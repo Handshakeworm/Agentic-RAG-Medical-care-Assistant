@@ -1,0 +1,307 @@
+name: medical-rag
+
+# ─────────────────────────────────────────────
+# 公共配置复用
+# ─────────────────────────────────────────────
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
+# ─────────────────────────────────────────────
+# 服务定义
+# ─────────────────────────────────────────────
+services:
+
+  # ── 客户端层 ──────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./infra/docker/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - main
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── API 服务层（含 Agent / RAG / Embedding / Reranker）──
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.api
+    container_name: api
+    env_file:
+      - .env
+    volumes:
+      - ${BGE_M3_MODEL_PATH}:${BGE_M3_MODEL_PATH}:ro
+      - ${RERANKER_MODEL_PATH}:${RERANKER_MODEL_PATH}:ro
+      - ${PDF_INPUT_DIR}:${PDF_INPUT_DIR}:ro
+      - ${MINERU_OUTPUT_DIR}:${MINERU_OUTPUT_DIR}
+    expose:
+      - "8000"
+    depends_on:
+      llm:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      milvus-standalone:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - main
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── LLM 推理层（llama.cpp server，GPU 直通）──
+  llm:
+    image: ghcr.io/ggerganov/llama.cpp:server-cuda
+    container_name: llm
+    volumes:
+      - /data/LLMs:/models:ro
+    command:
+      - "--model"
+      - "/models/Qwen3.5/Qwen3.5-35B-A3B/Qwen3.5-35B-A3B-Q4_K_M/Qwen3.5-35B-A3B-Q4_K_M.gguf"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--n-gpu-layers"
+      - "99"           # 全部层放 GPU，如需 CPU offload 调低此值
+      - "--ctx-size"
+      - "8192"
+      - "--threads"
+      - "8"
+      - "--batch-size"
+      - "512"
+      - "--parallel"
+      - "4"            # 并发请求槽位
+    expose:
+      - "8080"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s   # 模型加载需要时间
+    networks:
+      - main
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── 数据层：Milvus（需要 etcd + minio 依赖）──
+  milvus-etcd:
+    image: quay.io/coreos/etcd:v3.5.18
+    container_name: milvus-etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - /data/volumes/milvus/etcd:/etcd
+    command: >
+      etcd
+      --advertise-client-urls=http://127.0.0.1:2379
+      --listen-client-urls=http://0.0.0.0:2379
+      --data-dir=/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - main
+    restart: unless-stopped
+    logging: *default-logging
+
+  milvus-minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    container_name: milvus-minio
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - /data/volumes/milvus/minio:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - main
+    restart: unless-stopped
+    logging: *default-logging
+
+  milvus-standalone:
+    image: milvusdb/milvus:v2.5.9
+    container_name: milvus-standalone
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: milvus-etcd:2379
+      MINIO_ADDRESS: milvus-minio:9000
+    volumes:
+      - /data/volumes/milvus/data:/var/lib/milvus
+    expose:
+      - "19530"
+    depends_on:
+      milvus-etcd:
+        condition: service_healthy
+      milvus-minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
+    networks:
+      - main
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── 数据层：PostgreSQL ──
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - /data/volumes/postgres:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - main
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── 数据层：MongoDB ──
+  mongo:
+    image: mongo:7
+    container_name: mongo
+    volumes:
+      - /data/volumes/mongo:/data/db
+    expose:
+      - "27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - main
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── 数据层：Redis ──
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    volumes:
+      - /data/volumes/redis:/data
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - main
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── 监控层 ──────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - /data/volumes/prometheus:/prometheus
+    networks:
+      - main
+    restart: unless-stopped
+    logging: *default-logging
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./infra/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - /data/volumes/grafana:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - main
+    restart: unless-stopped
+    logging: *default-logging
+
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    expose:
+      - "3100"
+    volumes:
+      - ./infra/loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - /data/volumes/loki:/loki
+    networks:
+      - main
+    restart: unless-stopped
+    logging: *default-logging
+
+  promtail:
+    image: grafana/promtail:latest
+    container_name: promtail
+    volumes:
+      - ./infra/promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    depends_on:
+      - loki
+    networks:
+      - main
+    restart: unless-stopped
+    logging: *default-logging
+
+# ─────────────────────────────────────────────
+# 网络
+# ─────────────────────────────────────────────
+networks:
+  main:
+    driver: bridge
