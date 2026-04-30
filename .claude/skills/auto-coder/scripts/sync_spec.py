@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Spec Sync — splits DEV_SPEC.md into chapter files under auto-coder/references/.
+规范同步 — 将 DEV_SPEC.md 按章节拆分为 auto-coder/references/ 下的独立文件。
 
-Usage:
+用法：
     python scripts/sync_spec.py [--force]
 """
 
@@ -22,7 +22,7 @@ class Chapter(NamedTuple):
     line_count: int
 
 
-# Chapter number -> English slug
+# 章节编号 -> 英文缩略名（与 DEV_SPEC 顶级章节 1:1 对应）
 NUMBER_SLUG_MAP = {
     1: "overview",
     2: "tech-stack",
@@ -30,46 +30,38 @@ NUMBER_SLUG_MAP = {
     4: "agent-design",
     5: "infrastructure",
     6: "evaluation",
-    7: "skills",
+    7: "prompts",
     8: "schedule",
+    9: "contracts",
 }
-
-# DEV_SPEC uses "# N." for top-level chapters, but Section 1.2 is large enough
-# to warrant its own file. We split Section 1 into two:
-#   Chapter 1 (overview):   from "# 1." to "## 1.2"
-#   Chapter 2 (tech-stack): from "## 1.2" to "# 2."
-# Sections 2-7 in DEV_SPEC map to chapters 3-8 here.
 
 
 def detect_chapters(content: str) -> List[Chapter]:
     lines = content.split('\n')
-    # Collect split points: (chapter_number, title, line_index)
+    # 收集分割点: (章节编号, 标题, 行索引)
     splits: List[Tuple[int, str, int]] = []
 
+    in_code_block = False  # 跟踪围栏式代码块状态（```...```），避免把代码注释里的 "# 1." 当作章节
+
     for i, line in enumerate(lines):
-        # Match "# N. Title" (top-level chapter headers)
-        m = re.match(r'^# (\d+)\.\s+(.+)$', line)
+        # 围栏式代码块边界切换（允许 ```python / ```text 等语言标识）
+        if re.match(r'^```', line):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+
+        # 匹配 "# N. 标题" 或 "# N 标题"（顶级章节标题，句号可选）
+        m = re.match(r'^# (\d+)\.?\s+(.+)$', line)
         if m:
             sec_num = int(m.group(1))
             title = m.group(2).strip()
-            if sec_num == 1:
-                # Chapter 1: overview (starts at # 1.)
-                splits.append((1, title, i))
-            else:
-                # DEV_SPEC sections 2-7 -> chapters 3-8
-                ch_num = sec_num + 1
-                splits.append((ch_num, title, i))
-            continue
-
-        # Match "## 1.2" to split tech-stack out of Section 1
-        m2 = re.match(r'^## 1\.2\s+(.+)$', line)
-        if m2:
-            splits.append((2, m2.group(1).strip(), i))
+            splits.append((sec_num, title, i))
 
     if not splits:
-        raise ValueError("No chapters found. Expected '# N. Title' headers in DEV_SPEC.md")
+        raise ValueError("未找到章节。DEV_SPEC.md 中应包含 '# N. 标题' 或 '# N 标题' 格式的标题")
 
-    # Sort by line position to handle insertion of 1.2 split
+    # 按行位置排序
     splits.sort(key=lambda x: x[2])
 
     chapters = []
@@ -84,18 +76,18 @@ def detect_chapters(content: str) -> List[Chapter]:
 
 def sync(force: bool = False):
     skill_dir = Path(__file__).parent.parent          # auto-coder/
-    repo_root = skill_dir.parent.parent               # project root
+    repo_root = skill_dir.parent.parent.parent        # 项目根目录
     dev_spec  = repo_root / "DEV_SPEC.md"
     specs_dir = skill_dir / "references"
     hash_file = specs_dir / ".spec_hash"
 
     if not dev_spec.exists():
-        print(f"ERROR: {dev_spec} not found"); sys.exit(1)
+        print(f"错误：{dev_spec} 未找到"); sys.exit(1)
 
-    # Hash check
+    # 哈希检查
     current_hash = hashlib.sha256(dev_spec.read_bytes()).hexdigest()
     if not force and hash_file.exists() and hash_file.read_text().strip() == current_hash:
-        print("specs up-to-date"); return
+        print("规范已是最新状态"); return
 
     content = dev_spec.read_text(encoding='utf-8')
     chapters = detect_chapters(content)
@@ -103,20 +95,20 @@ def sync(force: bool = False):
 
     specs_dir.mkdir(parents=True, exist_ok=True)
 
-    # Clean orphans
+    # 清理孤立文件
     old = {f.name for f in specs_dir.glob("*.md")}
     new = {ch.filename for ch in chapters}
     for f in old - new:
         (specs_dir / f).unlink()
 
-    # Write chapters
+    # 写入章节文件
     for ch in chapters:
         (specs_dir / ch.filename).write_text('\n'.join(lines[ch.start_line:ch.end_line]), encoding='utf-8')
 
     hash_file.write_text(current_hash)
-    print(f"synced {len(chapters)} chapters:")
+    print(f"已同步 {len(chapters)} 个章节：")
     for ch in chapters:
-        print(f"  {ch.filename} ({ch.line_count} lines) — {ch.cn_title}")
+        print(f"  {ch.filename} ({ch.line_count} 行) — {ch.cn_title}")
 
 
 if __name__ == "__main__":

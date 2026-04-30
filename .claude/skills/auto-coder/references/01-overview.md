@@ -1,52 +1,91 @@
 # 1. 项目总览
-## 作者的电脑配置为9800x3d，rtx5070ti (16GB)，RAM：48GB
-## 项目亮点：
 
-项目带有SKILL libarary，为众多流程创建其专属SKILL，形成可复用，方便管理，方便调试，避免上下文堆积，节省tokens的优点
+> 作者本地开发环境：CPU 9800X3D，GPU RTX 5070 Ti（16GB），RAM 48GB。文档中涉及"GPU 显存"的部署/选型决策均以此硬件为基准。
 
-于此同时，该项目在开发中也高度依赖SKILL进行自动开发、测试
+## 1.1 项目亮点：
+
+开发过程使用了 Claude Code SKILL 进行自动开发、测试：在 `.claude/skills/` 中维护 `auto-coder` 与 `skill-creator` 等开发辅助技能，帮助规范驱动开发、自动化测试与打包。
 
 
-根据业务场景进行优化，听取了经验丰富主任医师的意见
+深入实际业务场景，根据业务场景进行优化，听取了经验丰富主任医师的意见进行多次商讨
 
-## 目录
+
+可观测、可视化管理、集成评估
+
+## 1.2 目录
 ```
 1. 项目总览
-   1.1 总体架构
-   1.2 技术选型（模型选型 + 数据存储选型）
-   
-2. RAG系统pipeline
-   2.1 数据摄取（MinerU）
-   2.2 Chunking
-   2.3 Transform & Enrichment
-   2.4 幂等性设计
-   2.5 Embedding
-   2.6 索引存储
+   1.1 项目亮点
+   1.2 目录
+   1.3 总体架构
 
-3. Agent 设计（整合目前分散的 Agent 内容）
-   3.1 工作流（LangGraph StateGraph）
-   3.2 检索策略（两步走粗排+精排）
-   3.3 上下文管理
+2. 技术选型
+   2.1 Embedding 模型选型
+   2.2 Agent 及 RAG 系统模型选型
+      2.2.1 理论选型
+      2.2.2 选型测评结果
+   2.3 Reranker 模型选型
+   2.4 数据存储选型及具体设计
+      2.4.1 Milvus 医学文献向量库
+      2.4.2 PostgreSQL 元数据存储
+      2.4.3 PostgreSQL 会话与对话记录
+      2.4.4 MongoDB 原始文档存储
+      2.4.5 PostgreSQL 病人信息
+      2.4.6 Milvus 术语向量库
 
-4. 基础设施（监控、缓存、权限等）
+3. RAG 系统 Pipeline
+   3.1 数据摄取
+      3.1.1 数据加载及处理（MinerU）
+      3.1.2 Chunking
+      3.1.3 Transform & Enrichment
+      3.1.4 幂等性设计
+      3.1.5 Embedding
+      3.1.6 索引存储
+   3.2 召回策略
+      3.2.1 查询预处理（Query Processing）
+      3.2.2 召回（Dense + Sparse + RRF 融合）
+      3.2.3 精确过滤与重排
 
-5. 系统性能评估（RAG 评估 + Agent 评估统一放这里）
+4. Agent 设计
+   4.1 工作流（LangGraph StateGraph，16 节点 + 2 条件路由）
+   4.2 上下文管理（Select + Compress 两层架构）
 
-6. 项目目录结构
+5. 基础设施
+   5.1 性能优化层（Redis 缓存、连接池）
+   5.2 监控层（Prometheus + Grafana + Loki + 审计系统）
+   5.3 管理层（动态配置、权限系统）
 
-7. 项目排期
-   7.1 排期原则
-   7.2 阶段总览
-   7.3 详细排期
-   7.4 进度跟踪表
+6. 评估
+   6.1 RAG 检索评估
+   6.2 Agent 决策评估
+   6.3 端到端系统评估
+   6.4 三层评估的关系
+
+7. Prompt 模板
+
+8. 项目排期
+   8.1 排期原则
+   8.2 阶段总览
+   8.3 详细排期
+   8.4 进度跟踪表
+
+9. 全局实现契约（跨章节，auto-coder 必读）
+   9.1 统一机制（with_structured_output + 重试 + 分级失败处理）
+   9.2 Schema 演进兼容性
+   9.3 全量结构化输出清单
+   9.4 不需要结构化输出的 LLM 调用
+   9.5 全量 Pydantic Schema 定义
+   9.6 审计埋点契约（rag_trace 写入规则）
+   9.7 运行时常量集中（agent_limits）
+   9.8 跨章节数据契约快速参考（terms_collection 等）
 ```
 
-## 1.1 总体架构
-### 1.1.1 项目文件目录结构
+## 1.3 总体架构
+### 1.3.1 项目文件目录结构
 ```
 Agentic-RAG-Medical-care-Assistant/
 │
-├── docker-compose.yml                  # 容器编排：PostgreSQL, Milvus, MongoDB, Redis, Prometheus, Grafana, Loki
+├── docker-compose.yml                  # 容器编排（共 14 个）：nginx, api, Milvus（standalone+etcd+minio）, PostgreSQL, MongoDB, Redis, Prometheus, Grafana, Loki, Promtail, Node Exporter, DCGM Exporter（LLM 推理通过云端 API 调用）
 ├── .env.example                        # 环境变量模板（不提交 .env）
 ├── .gitignore
 ├── pyproject.toml                      # 项目依赖与构建配置
@@ -55,7 +94,7 @@ Agentic-RAG-Medical-care-Assistant/
 │
 ├── config/                             # 静态配置文件
 │   ├── settings.py                     # 全局配置（从环境变量/文件加载）
-│   ├── model_config.py                 # 模型配置：BGE-M3、Reranker、Qwen 参数
+│   ├── model_config.py                 # 模型配置：Qwen3-Embedding-8B、Reranker、DashScope API 配置
 │   ├── milvus_schema.py                # Milvus Collection Schema 定义（docs_collection + terms_collection）
 │   └── logging_config.py               # 日志格式与 Promtail 适配
 │
@@ -75,7 +114,7 @@ Agentic-RAG-Medical-care-Assistant/
 │   │   ├── middleware/
 │   │   │   ├── __init__.py
 │   │   │   ├── auth_middleware.py       # JWT 验证 + 角色判断（admin/patient）
-│   │   │   └── rate_limiter.py         # 限流，保护本地资源
+│   │   │   └── rate_limiter.py         # 限流（防止 API 超配额）
 │   │   └── schemas/                    # Pydantic 请求/响应模型
 │   │       ├── __init__.py
 │   │       ├── diagnosis_schema.py
@@ -84,58 +123,74 @@ Agentic-RAG-Medical-care-Assistant/
 │   ├── agent/                          # Agent 编排层（LangGraph StateGraph）
 │   │   ├── __init__.py
 │   │   ├── graph.py                    # StateGraph 定义：节点注册、边与条件边连接
-│   │   ├── state.py                    # DiagnosisState Schema（TypedDict）
+│   │   ├── state.py                    # MedicalState Schema（TypedDict）+ create_initial_state 工厂函数
 │   │   ├── nodes/                      # 各节点实现
 │   │   │   ├── __init__.py
-│   │   │   ├── symptom_preprocess.py   # 节点 0a：LLM NER + Entity Linking
-│   │   │   ├── symptom_clarification.py# 节点 0b：追问引导（interrupt()）
-│   │   │   ├── emergency_referral.py   # 节点 0c：高危转诊
-│   │   │   ├── symptom_analysis.py     # 节点 1a：症状初步分析 + 科室分布
-│   │   │   ├── dept_filtered_recall.py # 节点 1b：科室精细召回
-│   │   │   ├── cross_dept_recall.py    # 节点 1c：跨科室全库召回
-│   │   │   ├── history_analysis.py     # 节点 2：患者历史分析
-│   │   │   ├── diagnostic_reasoning.py # 节点 3：诊断推理
-│   │   │   ├── uncertainty_report.py   # 节点 4a：低置信度输出
-│   │   │   ├── diagnosis_report.py     # 节点 4b：高置信度输出
-│   │   │   └── medication_safety.py    # 节点 5：用药安全检查
+│   │   │   ├── info_collect.py         # 节点 ①：主诉提取 + 病史/报告加载（单轮无交互）
+│   │   │   ├── analyze_initial_reports.py  # 节点 ①.5：初始报告解析（多模态 LLM 直读，提取结构化发现）
+│   │   │   ├── build_query.py          # 节点 ②：NER + Entity Linking + 术语扩展 + Query 构建/改写
+│   │   │   ├── retrieve.py             # 节点 ③：全量向量召回
+│   │   │   ├── extract_symptoms.py     # 节点 ④：症状提取（TF-IDF + 分层术语归一化，零 LLM）
+│   │   │   ├── select_symptom.py       # 节点 ⑤：维度缺口优先 + 选择高区分度追问症状（信息增益）
+│   │   │   ├── generate_followup.py    # 节点 ⑥a：生成追问问题
+│   │   │   ├── wait_followup_answer.py # 节点 ⑥b：interrupt 等待用户回答
+│   │   │   ├── process_followup.py     # 节点 ⑦：处理追问回答
+│   │   │   ├── recommend_exam.py       # 节点 ⑧a：生成检查建议
+│   │   │   ├── wait_exam_report.py     # 节点 ⑧b：interrupt 等待检查结果回传
+│   │   │   ├── process_exam_result.py  # 节点 ⑨：处理检查结果回传
+│   │   │   ├── diagnose.py             # 节点 ⑩：诊断推理（Cross-Encoder 截断 + 三步分阶段 LLM 推理）
+│   │   │   ├── safety_gate.py           # 节点 ⑪：安全约束门控（规则+LLM）
+│   │   │   ├── generate_advice.py      # 节点 ⑫：生成建议（用药/检查/高危提示）
+│   │   │   └── format_response.py      # 节点 ⑬：格式化最终回复
+│   │   ├── schemas/                    # LLM 结构化输出 Pydantic Schema（详见 §9.5）
+│   │   │   ├── __init__.py
+│   │   │   ├── info_collect.py         # InfoCollectOutput
+│   │   │   ├── report_parser.py        # ReportFinding, ReportFindings
+│   │   │   ├── ner.py                  # NEREntity, NERResult
+│   │   │   ├── entity_linking.py       # EntityLinkingMatch, EntityLinkingResult
+│   │   │   ├── query_construction.py   # QueryConstructionOutput
+│   │   │   ├── symptom_selection.py    # DimensionSelection, AskabilityJudgment
+│   │   │   ├── followup.py             # FollowupParseResult
+│   │   │   ├── diagnosis.py            # HistoryFactor, SlotRelevance, ReportEvidence, CandidateEvidence, EvidenceSheet, RankedDisease, DiagnosisRanking, DiagnosisOutput
+│   │   │   ├── safety_gate.py          # SafetyGateOutput
+│   │   │   ├── advice.py               # AdviceOutput
+│   │   │   ├── ingestion.py            # ChunkEnrichmentOutput
+│   │   │   └── evaluation.py           # LLM Judge 评分 Schema
+│   │   ├── utils/                      # Agent 层共享工具
+│   │   │   └── report_parser.py        # 报告解析共享逻辑（多模态 LLM 直读 + 结构化发现提取，①.5 和 ⑨ 共用）
 │   │   └── routers/                    # 条件边路由逻辑
 │   │       ├── __init__.py
-│   │       ├── risk_router.py          # 高危信号筛查
-│   │       ├── completeness_router.py  # 追问循环判断
-│   │       ├── dept_router.py          # 科室集中度路由
-│   │       └── confidence_router.py    # 置信度路由
+│   │       ├── should_continue.py      # 追问/诊断 两路路由
+│   │       └── diagnose_router.py      # 诊断后路由（need_exam / safety_gate）
 │   │
 │   ├── rag/                            # RAG 系统 Pipeline
 │   │   ├── __init__.py
-│   │   ├── ingestion/                  # 2.1 数据摄取
+│   │   ├── ingestion/                  # 3.1 数据摄取
 │   │   │   ├── __init__.py
-│   │   │   ├── mineru_loader.py        # 2.1.1 MinerU 产物加载（读取 markdown + content_list）
-│   │   │   ├── chunking.py             # 2.1.2 RecursiveCharacterTextSplitter 切分
-│   │   │   ├── enrichment.py           # 2.1.3 LLM 增强（title/summary/tags/questions）
-│   │   │   ├── image_caption.py        # 2.1.3.2 图像 Caption 关联绑定
-│   │   │   ├── idempotency.py          # 2.1.4 幂等性：source_id / heading_path_id / content_hash
-│   │   │   ├── embedding.py            # 2.1.5 多向量 Embedding（Dense + Sparse，BGE-M3）
-│   │   │   ├── storage.py              # 2.1.6 写入 PostgreSQL + Milvus（含僵尸清理）
+│   │   │   ├── mineru_loader.py        # 3.1.1 MinerU 产物加载（读取 markdown + content_list）
+│   │   │   ├── chunking.py             # 3.1.2 父子分块：先按 heading 切父块，再 RecursiveCharacterTextSplitter 切子块
+│   │   │   ├── enrichment.py           # 3.1.3 LLM 增强（title/summary/tags/questions）
+│   │   │   ├── idempotency.py          # 3.1.4 幂等性：source_id / heading_path_id / chunk_id（含父块 "parent" 约定）/ content_hash
+│   │   │   ├── embedding.py            # 3.1.5 多向量 Embedding（Dense: Qwen3-Embedding-8B, Sparse: Milvus BM25）
+│   │   │   ├── storage.py              # 3.1.6 写入 PostgreSQL + Milvus（含僵尸清理）
 │   │   │   └── pipeline.py             # 完整摄取 Pipeline 编排（串联以上步骤）
 │   │   │
-│   │   ├── retrieval/                  # 2.2 召回策略
+│   │   ├── retrieval/                  # 3.2 召回策略
 │   │   │   ├── __init__.py
-│   │   │   ├── query_processing.py     # 2.2.1 查询预处理（指代消歧、关键词提取、术语扩展、多角度改写）
-│   │   │   ├── sparse_retriever.py     # 2.2.2 Sparse Route（BM25）
-│   │   │   ├── dense_retriever.py      # 2.2.2 Dense Route（MultiQuery + 内层 RRF）
-│   │   │   ├── fusion.py               # 2.2.2 外层 RRF 融合 + 多向量去重
-│   │   │   └── reranker.py             # 2.2.3 精排（BGE-Reranker-v2-m3 / 回退策略）
+│   │   │   ├── query_processing.py     # 3.2.1 查询预处理（指代消歧、关键词提取、术语扩展、多角度改写）
+│   │   │   ├── sparse_retriever.py     # 3.2.2 Sparse Route（Milvus BM25 全文检索）
+│   │   │   ├── dense_retriever.py      # 3.2.2 Dense Route（单次 ANN）
+│   │   │   ├── fusion.py               # 3.2.2 单阶段多路 RRF 融合 + 多向量去重
+│   │   │   └── reranker.py             # 3.2.3 Cross-Encoder 精排（diagnose ⑩ 前置截断，非检索阶段调用 / 回退策略）
 │   │   │
-│   │   └── context/                    # Agent 上下文管理（3.2）
-│   │       ├── __init__.py
-│   │       ├── compressor.py           # 上下文压缩（多轮对话摘要）
-│   │       └── selector.py             # 上下文选择（历史筛选/截断）
+│   │   └── context/                    # Agent 上下文管理（4.2）
+│   │       └── __init__.py             # 当前固定流程下无需独立 compact/select 节点（见 4.2.4 / 4.2.5），上下文管理逻辑内嵌于各业务节点；compressor.py / selector.py 为未来开放式交互场景预留，阶段一不实现
 │   │
 │   ├── models/                         # 模型推理层
 │   │   ├── __init__.py
-│   │   ├── llm_client.py              # LLM 推理客户端（Qwen，llama.cpp/vLLM 后端）
-│   │   ├── embedding_model.py         # BGE-M3 Embedding（CPU 推理）
-│   │   └── reranker_model.py          # BGE-Reranker-v2-m3（CPU 推理）
+│   │   ├── llm_client.py              # LLM 推理客户端（DashScope OpenAI-compatible API）
+│   │   ├── embedding_model.py         # Qwen3-Embedding-8B（GPU 推理，INT8）
+│   │   └── reranker_model.py          # BGE-Reranker-v2-minicpm-layerwise（GPU 推理，与 Embedding 共享显卡）
 │   │
 │   ├── db/                            # 数据与缓存层
 │   │   ├── __init__.py
@@ -143,56 +198,36 @@ Agentic-RAG-Medical-care-Assistant/
 │   │   │   ├── __init__.py
 │   │   │   ├── connection.py           # PostgreSQL 连接池
 │   │   │   ├── models.py               # ORM 模型（sources, chunks, users, patients, conversations 等）
+│   │   │   ├── metrics.py              # SQLAlchemy 事件订阅 → Prometheus Histogram（依赖层指标，§5.2.1 ③）
 │   │   │   └── migrations/             # 数据库迁移脚本（Alembic）
 │   │   │       └── ...
 │   │   ├── milvus/
 │   │   │   ├── __init__.py
 │   │   │   ├── connection.py           # Milvus 连接管理
-│   │   │   ├── docs_collection.py      # 医学文献向量库操作（1.2.4.1）
-│   │   │   └── terms_collection.py     # 术语向量库操作（1.2.4.6）
+│   │   │   ├── client.py               # 统一调用封装 + Prometheus Histogram（依赖层指标，§5.2.1 ③）
+│   │   │   ├── docs_collection.py      # 医学文献向量库操作（2.4.1）
+│   │   │   └── terms_collection.py     # 术语向量库操作（2.4.6）
 │   │   ├── mongo/
 │   │   │   ├── __init__.py
 │   │   │   ├── connection.py           # MongoDB 连接管理
-│   │   │   └── raw_documents.py        # raw_documents Collection 操作（1.2.4.4）
+│   │   │   └── raw_documents.py        # raw_documents Collection 操作（2.4.4）
 │   │   └── redis/
 │   │       ├── __init__.py
-│   │       └── cache.py                # Redis 缓存（配置缓存 + RAG 响应缓存）
+│   │       └── cache.py                # Redis 缓存（仅配置缓存，MVP 阶段不做 RAG 响应缓存，见 §5.1）
+│   │
+│   ├── prompts/                       # LLM Prompt 模板
+│   │   ├── __init__.py
+│   │   ├── ingestion.py               # 数据摄取增强 Prompts（title/summary/tags/hypothetical_questions）
+│   │   ├── agent.py                   # Agent 节点 Prompts（病史采集、Query 构建、追问、诊断、安全门控、建议生成）
+│   │   └── evaluation.py              # LLM Judge 评估 Prompts
 │   │
 │   └── common/                        # 公共工具
 │       ├── __init__.py
-│       ├── normalize.py               # 文本规范化函数（全角转半角、NFC 等，见 2.1.4.2）
+│       ├── normalize.py               # 文本规范化函数（全角转半角、NFC 等，见 3.1.4.2）
 │       ├── hashing.py                 # SHA256 工具（chunk_id、content_hash、heading_path_id）
 │       └── metrics.py                 # Prometheus 指标埋点
 │
-├── skills/                            # SKILL Library（见项目亮点）
-│   ├── core/                          # Skill 引擎
-│   │   ├── __init__.py
-│   │   ├── loader.py
-│   │   ├── registry.py
-│   │   └── executor.py
-│   ├── chunk-enrichment/              # Chunk 语义增强 Skill
-│   │   ├── SKILL.md
-│   │   ├── references/
-│   │   ├── scripts/
-│   │   └── assets/
-│   ├── diagnostic-reasoning/          # 诊断推理 Skill
-│   │   ├── references/
-│   │   └── scripts/
-│   ├── query-disambiguation/          # 查询消歧 Skill
-│   │   ├── references/
-│   │   └── scripts/
-│   ├── symptom-standardize/           # 症状标准化 Skill
-│   │   ├── references/
-│   │   ├── scripts/
-│   │   └── assets/
-│   ├── followup-generation/           # 追问生成 Skill
-│   │   └── references/
-│   └── llm-judge/                     # LLM 评估 Skill
-│       ├── references/
-│       ├── scripts/
-│       └── assets/
-│
-├── terms/                             # 术语词典数据（1.2.4.6 数据来源）
+├── terms/                             # 术语词典数据（2.4.6 数据来源）
 │   ├── chip_cblue/                    # CHIP/CBLUE 口语→标准术语数据集
 │   ├── icd10_cn/                      # ICD-10-CN 国家医保局临床版
 │   ├── cmesh/                         # CMeSH 中国医学主题词表
@@ -208,7 +243,7 @@ Agentic-RAG-Medical-care-Assistant/
 │           ├── {document_name}_middle.json
 │           └── {document_name}_model.json
 │
-├── evaluation/                        # 5. 评估系统
+├── evaluation/                        # 6. 评估系统
 │   ├── __init__.py
 │   ├── datasets/                      # 测试集（JSON/JSONL）
 │   │   ├── rag_eval.jsonl             # RAG 检索质量测试集
@@ -222,8 +257,7 @@ Agentic-RAG-Medical-care-Assistant/
 │
 ├── infra/                             # 基础设施配置
 │   ├── docker/
-│   │   ├── Dockerfile.api             # API 服务镜像
-│   │   ├── Dockerfile.llm             # LLM 推理服务镜像
+│   │   ├── Dockerfile.api             # API 服务镜像（FastAPI + Agent + RAG + Embedding + Reranker）
 │   │   └── nginx.conf                 # Nginx 反向代理配置
 │   ├── prometheus/
 │   │   └── prometheus.yml             # Prometheus 采集配置
@@ -246,73 +280,83 @@ Agentic-RAG-Medical-care-Assistant/
     │   ├── test_hashing.py
     │   ├── test_chunking.py
     │   └── test_fusion.py
-    └── integration/
-        ├── test_ingestion_pipeline.py
-        ├── test_retrieval.py
-        └── test_agent_workflow.py
+    ├── integration/                    # Mock LLM + Mock DB 的模块集成测试
+    │   ├── test_ingestion_pipeline.py
+    │   ├── test_retrieval.py
+    │   └── test_agent_workflow.py
+    └── e2e/                            # 真实 DashScope + 真实 Milvus/PG 的端到端冒烟（阶段 J）
+        ├── test_ingestion_e2e.py       # J1
+        ├── test_retrieval_e2e.py       # J2
+        ├── test_agent_workflow_e2e.py  # J3
+        └── test_api_e2e.py             # J4
 ```
-### 目录与文档章节对应关系
+### 1.3.2 目录与文档章节对应关系
 
 | DEV_SPEC 章节 | 对应目录 |
 |---|---|
-| 1.2.1 BGE-M3 Embedding 模型 | `src/models/embedding_model.py` |
-| 1.2.2 Qwen LLM 推理模型 | `src/models/llm_client.py` |
-| 1.2.3 BGE-Reranker 精排模型 | `src/models/reranker_model.py` |
-| 1.2.4.1 Milvus 医学文献向量库 | `src/db/milvus/docs_collection.py` |
-| 1.2.4.2 PostgreSQL 元数据存储 | `src/db/postgres/` |
-| 1.2.4.3 PostgreSQL 对话记录 | `src/db/postgres/models.py` → conversations |
-| 1.2.4.4 MongoDB 原始文档存储 | `src/db/mongo/raw_documents.py` |
-| 1.2.4.5 PostgreSQL 病人信息 | `src/db/postgres/models.py` → patients 等 |
-| 1.2.4.6 Milvus 术语向量库 | `src/db/milvus/terms_collection.py` + `terms/` |
-| 2.1.1 MinerU 数据加载 | `src/rag/ingestion/mineru_loader.py` |
-| 2.1.2 Chunking | `src/rag/ingestion/chunking.py` |
-| 2.1.3 Transform & Enrichment | `src/rag/ingestion/enrichment.py` + `image_caption.py` |
-| 2.1.4 幂等性设计 | `src/rag/ingestion/idempotency.py` + `src/common/hashing.py` |
-| 2.1.5 Embedding | `src/rag/ingestion/embedding.py` |
-| 2.1.6 索引存储 | `src/rag/ingestion/storage.py` |
-| 2.2.1 查询预处理 | `src/rag/retrieval/query_processing.py` |
-| 2.2.2 召回（Dense + Sparse + RRF） | `src/rag/retrieval/` |
-| 2.2.3 精排与重排 | `src/rag/retrieval/reranker.py` |
-| 3.1 Agent 工作流 | `src/agent/graph.py` + `nodes/` + `routers/` |
-| 3.2 上下文管理 | `src/rag/context/` |
-| 4.1 Redis 缓存 | `src/db/redis/cache.py` |
-| 4.2 监控层 | `infra/prometheus/` + `infra/grafana/` + `infra/loki/` |
-| 4.3 权限与配置 | `src/api/middleware/` + `src/db/postgres/` |
-| 5. 评估系统 | `evaluation/` |
-| SKILL Library | `skills/` |
+| 2.1 Qwen3-Embedding-8B 模型 | `src/models/embedding_model.py` |
+| 2.2 云端 LLM API（DashScope） | `src/models/llm_client.py` |
+| 2.3 BGE-Reranker-v2-minicpm-layerwise 精排模型 | `src/models/reranker_model.py` |
+| 2.4.1 Milvus 医学文献向量库 | `src/db/milvus/docs_collection.py` |
+| 2.4.2 PostgreSQL 元数据存储 | `src/db/postgres/` |
+| 2.4.3 PostgreSQL 会话与对话记录 | `src/db/postgres/models.py` → sessions / conversations |
+| 2.4.4 MongoDB 原始文档存储 | `src/db/mongo/raw_documents.py` |
+| 2.4.5 PostgreSQL 病人信息 | `src/db/postgres/models.py` → patients 等 |
+| 2.4.6 Milvus 术语向量库 | `src/db/milvus/terms_collection.py` + `terms/` |
+| 3.1.1 MinerU 数据加载 | `src/rag/ingestion/mineru_loader.py` |
+| 3.1.2 Chunking | `src/rag/ingestion/chunking.py` |
+| 3.1.3 Transform & Enrichment | `src/rag/ingestion/enrichment.py` |
+| 3.1.4 幂等性设计 | `src/rag/ingestion/idempotency.py` + `src/common/hashing.py` |
+| 3.1.5 Embedding | `src/rag/ingestion/embedding.py` |
+| 3.1.6 索引存储 | `src/rag/ingestion/storage.py` |
+| 3.2.1 查询预处理 | `src/rag/retrieval/query_processing.py` |
+| 3.2.2 召回（Dense + Sparse + RRF） | `src/rag/retrieval/` |
+| 3.2.3 Cross-Encoder 精排（diagnose ⑩ 前置） | `src/rag/retrieval/reranker.py` |
+| 4.1 Agent 工作流（16 节点 + 2 路由） | `src/agent/graph.py` + `nodes/`（①~⑬ 含 ①.5，⑥/⑧ 各拆 a/b）+ `routers/`（should_continue / diagnose_router） |
+| 4.2 上下文管理 | `src/rag/context/` |
+| 5.1 Redis 缓存 | `src/db/redis/cache.py` |
+| 5.2 监控层 | `infra/prometheus/` + `infra/grafana/` + `infra/loki/` |
+| 5.2.3 PostgreSQL 审计系统 | `src/db/postgres/models.py` → rag_trace / kb_change_log / config_change_log / diagnosis_feedback |
+| 5.3 动态配置管理 | `src/db/postgres/models.py` → system_config |
+| 5.3 权限与配置 | `src/api/middleware/` + `src/db/postgres/` |
+| 6. 评估系统 | `evaluation/` |
+| 7. Prompt 模板 | `src/prompts/` |
+| 9. 全局实现契约（跨章节） | `src/agent/schemas/`（Pydantic Schema 权威定义）+ `src/common/metrics.py`（模块级 Prometheus 指标对象 + `RetryObserver` callback，**不含装饰器/helper 封装**）；规则贯穿 3/4/6/7 章所有 LLM 调用实现，各调用点按 §9.1 模板裸写 |
 
-### 1.1.2 项目层级
+### 1.3.3 项目层级
+
+#### 逻辑层级说明
+
 **客户端层**
 
 - Nginx 反向代理（`infra/docker/nginx.conf`），暴露 REST 接口
-- 认证中间件（`src/api/middleware/auth_middleware.py`）与限流中间件（`src/api/middleware/rate_limiter.py`），确保本地资源稳定
+- 认证中间件（`src/api/middleware/auth_middleware.py`）与限流中间件（`src/api/middleware/rate_limiter.py`），防止 API 超配额，确保系统稳定
 
-**API 服务层**
+**API 服务层**（含 Agent 编排、RAG、Embedding/Reranker，同进程内调用）
 
 - FastAPI 应用（`src/api/app.py`），提供诊断、患者管理、健康检查、管理等路由
 - 请求/响应 Schema 校验（`src/api/schemas/`）
-
-**Agent 编排层（LangGraph StateGraph）**
-
-- 状态图驱动的多步诊断流程（`src/agent/graph.py`）
-- 节点：症状预处理、症状分析、病史分析、科室检索、跨科召回、诊断推理、用药安全、急诊转诊、诊断报告、不确定性报告、症状澄清（`src/agent/nodes/`）
-- 路由器：完整性路由、置信度路由、科室路由、风险路由（`src/agent/routers/`）
-
-**RAG 服务层**
-
+- 状态图驱动的多步诊断流程（`src/agent/graph.py`），基于信息增益收敛的迭代式工作流
+- 节点（16 个）：病史采集、初始报告解析、Query 构建、向量召回、症状提取、区分度选择、追问生成（⑥a）、追问等待（⑥b）、追问处理、建议检查（⑧a）、检查结果等待（⑧b）、检查结果处理、诊断推理、安全约束门控、建议生成、格式化回复（`src/agent/nodes/`）
+- 路由器（2 个）：should_continue（追问/诊断两路路由）、diagnose_router（诊断后路由：need_exam / safety_gate）（`src/agent/routers/`）
 - 数据摄取 Pipeline：MinerU 文档解析 → Chunking → LLM 增强（摘要/问题生成/图片描述） → 幂等写入 → Embedding → 向量存储（`src/rag/ingestion/`）
-- 检索 Pipeline：查询处理 → Dense/Sparse 双路检索 → RRF 融合 → Reranker 精排（`src/rag/retrieval/`）
+- 检索 Pipeline：查询处理 → Dense/Sparse 双路检索 → RRF 融合（`src/rag/retrieval/`）
 - 上下文管理：上下文筛选与压缩（`src/rag/context/`）
+- Embedding 推理：Qwen3-Embedding-8B，GPU 推理（INT8），与 Reranker 共享显卡（`src/models/embedding_model.py`）
+- Reranker 推理：BGE-Reranker-v2-minicpm-layerwise，GPU 推理，与 Embedding 共享显卡（`src/models/reranker_model.py`）
 
-**模型推理层（本地部署）**
+> **设计决策**：Agent/RAG 为 Python 函数调用，与 FastAPI 运行在同一进程内，无需跨容器网络通信。Embedding 和 Reranker 通过 Python 直接调用 GPU，合并进 `api` 容器可避免不必要的 HTTP 延迟，同时简化部署与调试。
 
-- LLM 推理：Qwen3.5 系列，通过 llama.cpp/Ollama 部署于本地 GPU（RTX 5070 Ti 16GB）（`src/models/llm_client.py`）
-- Embedding：BGE-M3，部署于 CPU（`src/models/embedding_model.py`）
-- Reranker：BGE-Reranker-v2-m3，部署于 CPU（`src/models/reranker_model.py`）
+**LLM 推理层（云端 API）**
+
+- LLM 推理：通过 OpenAI-compatible API 调用（`src/models/llm_client.py`）
+- 云端方案：DeepSeek-V3 / Qwen-Max 等，GPU 显存全部释放给 Embedding + Reranker
+
+> **设计决策**：LLM 推理迁移至云端后，RTX 5070 Ti 16GB 显存全部分配给 Embedding（Qwen3-Embedding-8B，INT8 约 8.5-8.8GB）和 Reranker（BGE-Reranker-v2-minicpm-layerwise，INT8 约 2.6GB），大幅提升检索质量和推理速度。
 
 **数据与缓存层**
 
-- 向量存储：Milvus（Dense + Sparse 向量，容器化部署）（`src/db/milvus/`）
+- 向量存储：Milvus（Dense + Sparse 向量，容器化部署，由 `milvus-standalone` + `milvus-etcd` + `milvus-minio` 三个容器组成）（`src/db/milvus/`）
 - 元数据存储：PostgreSQL（Chunk 元数据、来源文档、医学术语等）（`src/db/postgres/`）
 - 原始文档存储：MongoDB（MinerU 解析后的原始文档）（`src/db/mongo/`）
 - 缓存：Redis（FAQ、热点查询等）（`src/db/redis/`）
@@ -327,6 +371,88 @@ Agentic-RAG-Medical-care-Assistant/
 **基础设施层（本地部署）**
 
 - 容器编排：Docker Compose（`docker-compose.yml`）
-- 容器镜像：API 服务与 LLM 推理服务分离（`infra/docker/Dockerfile.api`、`infra/docker/Dockerfile.llm`）
+- 容器镜像：API 服务使用自定义 Dockerfile（`infra/docker/Dockerfile.api`）构建；LLM 推理通过 DashScope 云端 API 调用，无需本地容器
 - 存储：本地磁盘
 - 密钥管理：环境变量配置（`.env.example`）
+
+---
+
+#### 容器划分总览
+
+```mermaid
+graph TB
+    subgraph 外部
+        Client["外部请求 / 浏览器"]
+    end
+
+    subgraph 云端["云端服务"]
+        cloudapi["DashScope Cloud API<br/><i>qwen-max / qwen-plus</i><br/><i>OpenAI-compatible</i>"]
+    end
+
+    Client -->|"HTTP 80/443"| nginx
+
+    subgraph 主链路
+        direction LR
+        nginx["nginx<br/><i>反向代理 · nginx:alpine</i><br/><i>配置: infra/docker/nginx.conf</i>"]
+        nginx -->|"HTTP 8000"| api
+
+        subgraph api["容器: api &ensp;Dockerfile.api"]
+            direction LR
+            L1["FastAPI + Auth/RateLimit<br/>Middleware + API Routes"]
+            L2["LangGraph Agent<br/>（graph.py / nodes / routers）"]
+            L3["RAG Pipeline<br/>（ingestion / retrieval / context）"]
+            L4["Qwen3-Embedding-8B（GPU）<br/>+ BGE-Reranker-v2-minicpm-layerwise（GPU）"]
+            L1 --- L2 --- L3 --- L4
+        end
+    end
+
+    subgraph 数据层
+        direction LR
+        subgraph Milvus["Milvus 容器组（3个）"]
+            direction LR
+            standalone["standalone :19530<br/><i>Dense + Sparse</i>"]
+            etcd["etcd<br/><i>元数据</i>"]
+            minio["minio :9000<br/><i>对象存储</i>"]
+        end
+        postgres["postgres<br/><i>元数据 · Chunk/术语/患者</i>"]
+        mongo["mongo<br/><i>原始文档 · MinerU 解析结果</i>"]
+        redis["redis<br/><i>缓存 · FAQ/热点查询</i>"]
+    end
+
+    api -->|"HTTPS"| cloudapi
+    api -->|"TCP 19530"| standalone
+    api -->|"TCP 5432"| postgres
+    api -->|"TCP 27017"| mongo
+    api -->|"TCP 6379"| redis
+
+    subgraph 监控层["监控容器组（独立，故障不影响主服务）"]
+        direction TB
+        subgraph 监控行1[" "]
+            direction LR
+            prometheus["prometheus :9090"]
+            grafana["grafana :3000"]
+            loki["loki :3100"]
+            prometheus ~~~ grafana ~~~ loki
+        end
+        subgraph 监控行2[" "]
+            direction LR
+            promtail["promtail<br/><i>日志采集</i>"]
+            node_exp["node-exporter :9100<br/><i>宿主机</i>"]
+            dcgm_exp["dcgm-exporter :9400<br/><i>GPU</i>"]
+            promtail ~~~ node_exp ~~~ dcgm_exp
+        end
+        监控行1 ~~~ 监控行2
+    end
+
+    style api fill:#e8f4fd,stroke:#2196F3,color:#1a1a1a
+    style Milvus fill:#fff3e0,stroke:#FF9800,color:#1a1a1a
+    style 监控层 fill:#f3e5f5,stroke:#9C27B0,color:#1a1a1a
+    style 云端 fill:#e8f5e9,stroke:#4CAF50,color:#1a1a1a
+    style 监控行1 fill:transparent,stroke:none
+    style 监控行2 fill:transparent,stroke:none
+```
+
+容器清单（共 14 个）：
+- **主链路**：nginx → api（LLM 推理通过 DashScope 云端 API 调用，不占本地容器）
+- **数据层**：milvus-standalone、milvus-etcd、milvus-minio、postgres、mongo、redis
+- **监控层**：prometheus、grafana、loki、promtail、node-exporter、dcgm-exporter

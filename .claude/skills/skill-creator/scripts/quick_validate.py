@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Quick validation script for skills - minimal version
+技能快速验证脚本 - 精简版
 """
 
 import sys
@@ -9,14 +9,14 @@ import re
 try:
     import yaml
 except ImportError:
-    # Fallback: minimal YAML parsing if PyYAML not installed
+    # 回退：未安装 PyYAML 时使用最简 YAML 解析
     yaml = None
 
 from pathlib import Path
 
 
 def _parse_frontmatter_fallback(text):
-    """Minimal frontmatter parser when PyYAML is not available."""
+    """PyYAML 不可用时的最简 frontmatter 解析器。"""
     result = {}
     for line in text.strip().splitlines():
         line = line.strip()
@@ -27,96 +27,96 @@ def _parse_frontmatter_fallback(text):
 
 
 def validate_skill(skill_path):
-    """Basic validation of a skill"""
+    """技能的基本验证"""
     skill_path = Path(skill_path)
 
-    # Check SKILL.md exists
+    # 检查 SKILL.md 是否存在
     skill_md = skill_path / 'SKILL.md'
     if not skill_md.exists():
-        return False, "SKILL.md not found"
+        return False, "未找到 SKILL.md"
 
-    # Read and validate frontmatter
+    # 读取并验证 frontmatter
     content = skill_md.read_text(encoding='utf-8')
     if not content.startswith('---'):
-        return False, "No YAML frontmatter found"
+        return False, "未找到 YAML frontmatter"
 
-    # Extract frontmatter
+    # 提取 frontmatter
     match = re.match(r'^---\n(.*?)\n---', content, re.DOTALL)
     if not match:
-        return False, "Invalid frontmatter format"
+        return False, "frontmatter 格式无效"
 
     frontmatter_text = match.group(1)
 
-    # Parse YAML frontmatter
+    # 解析 YAML frontmatter
     try:
         if yaml:
             frontmatter = yaml.safe_load(frontmatter_text)
         else:
             frontmatter = _parse_frontmatter_fallback(frontmatter_text)
         if not isinstance(frontmatter, dict):
-            return False, "Frontmatter must be a YAML dictionary"
+            return False, "frontmatter 必须是 YAML 字典"
     except Exception as e:
-        return False, f"Invalid YAML in frontmatter: {e}"
+        return False, f"frontmatter 中的 YAML 无效：{e}"
 
-    # Define allowed properties
+    # 定义允许的属性
     ALLOWED_PROPERTIES = {'name', 'description', 'license', 'allowed-tools', 'metadata', 'compatibility'}
 
-    # Check for unexpected properties
+    # 检查意外的属性
     unexpected_keys = set(frontmatter.keys()) - ALLOWED_PROPERTIES
     if unexpected_keys:
         return False, (
-            f"Unexpected key(s) in SKILL.md frontmatter: {', '.join(sorted(unexpected_keys))}. "
-            f"Allowed properties are: {', '.join(sorted(ALLOWED_PROPERTIES))}"
+            f"SKILL.md frontmatter 中存在意外的键：{', '.join(sorted(unexpected_keys))}。"
+            f"允许的属性为：{', '.join(sorted(ALLOWED_PROPERTIES))}"
         )
 
-    # Check required fields
+    # 检查必填字段
     if 'name' not in frontmatter:
-        return False, "Missing 'name' in frontmatter"
+        return False, "frontmatter 中缺少 'name'"
     if 'description' not in frontmatter:
-        return False, "Missing 'description' in frontmatter"
+        return False, "frontmatter 中缺少 'description'"
 
-    # Extract name for validation
+    # 提取 name 进行验证
     name = frontmatter.get('name', '')
     if not isinstance(name, str):
-        return False, f"Name must be a string, got {type(name).__name__}"
+        return False, f"name 必须是字符串，当前类型为 {type(name).__name__}"
     name = name.strip()
     if name:
-        # Check naming convention (kebab-case: lowercase with hyphens)
+        # 检查命名规范（kebab-case：小写加连字符）
         if not re.match(r'^[a-z0-9-]+$', name):
-            return False, f"Name '{name}' should be kebab-case (lowercase letters, digits, and hyphens only)"
+            return False, f"名称 '{name}' 应为 kebab-case（仅限小写字母、数字和连字符）"
         if name.startswith('-') or name.endswith('-') or '--' in name:
-            return False, f"Name '{name}' cannot start/end with hyphen or contain consecutive hyphens"
-        # Check name length (max 64 characters per spec)
+            return False, f"名称 '{name}' 不能以连字符开头/结尾或包含连续连字符"
+        # 检查名称长度（规范要求最多 64 个字符）
         if len(name) > 64:
-            return False, f"Name is too long ({len(name)} characters). Maximum is 64 characters."
+            return False, f"名称过长（{len(name)} 个字符）。最大长度为 64 个字符。"
 
-    # Extract and validate description
+    # 提取并验证 description
     description = frontmatter.get('description', '')
     if not isinstance(description, str):
-        return False, f"Description must be a string, got {type(description).__name__}"
+        return False, f"description 必须是字符串，当前类型为 {type(description).__name__}"
     description = description.strip()
     if description:
-        # Check for angle brackets
+        # 检查尖括号
         if '<' in description or '>' in description:
-            return False, "Description cannot contain angle brackets (< or >)"
-        # Check description length (max 1024 characters per spec)
+            return False, "description 不能包含尖括号（< 或 >）"
+        # 检查描述长度（规范要求最多 1024 个字符）
         if len(description) > 1024:
-            return False, f"Description is too long ({len(description)} characters). Maximum is 1024 characters."
+            return False, f"描述过长（{len(description)} 个字符）。最大长度为 1024 个字符。"
 
-    # Validate compatibility field if present (optional)
+    # 验证 compatibility 字段（可选）
     compatibility = frontmatter.get('compatibility', '')
     if compatibility:
         if not isinstance(compatibility, str):
-            return False, f"Compatibility must be a string, got {type(compatibility).__name__}"
+            return False, f"compatibility 必须是字符串，当前类型为 {type(compatibility).__name__}"
         if len(compatibility) > 500:
-            return False, f"Compatibility is too long ({len(compatibility)} characters). Maximum is 500 characters."
+            return False, f"compatibility 过长（{len(compatibility)} 个字符）。最大长度为 500 个字符。"
 
-    return True, "Skill is valid!"
+    return True, "技能验证通过！"
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: python quick_validate.py <skill_directory>")
+        print("用法：python quick_validate.py <skill_directory>")
         sys.exit(1)
 
     valid, message = validate_skill(sys.argv[1])

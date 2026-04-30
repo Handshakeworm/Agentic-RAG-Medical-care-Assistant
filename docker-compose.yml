@@ -39,18 +39,14 @@ services:
     env_file:
       - .env
     volumes:
-      - ${BGE_M3_MODEL_PATH}:${BGE_M3_MODEL_PATH}:ro
+      - ${EMBEDDING_MODEL_PATH}:${EMBEDDING_MODEL_PATH}:ro
       - ${RERANKER_MODEL_PATH}:${RERANKER_MODEL_PATH}:ro
       - ${PDF_INPUT_DIR}:${PDF_INPUT_DIR}:ro
       - ${MINERU_OUTPUT_DIR}:${MINERU_OUTPUT_DIR}
     expose:
       - "8000"
     depends_on:
-      llm:
-        condition: service_healthy
       postgres:
-        condition: service_healthy
-      mongo:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -62,49 +58,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
-    networks:
-      - main
-    restart: unless-stopped
-    logging: *default-logging
-
-  # ── LLM 推理层（llama.cpp server，GPU 直通）──
-  llm:
-    image: ghcr.io/ggerganov/llama.cpp:server-cuda
-    container_name: llm
-    volumes:
-      - /data/LLMs:/models:ro
-    command:
-      - "--model"
-      - "/models/Qwen3.5/Qwen3.5-35B-A3B/Qwen3.5-35B-A3B-Q4_K_M/Qwen3.5-35B-A3B-Q4_K_M.gguf"
-      - "--host"
-      - "0.0.0.0"
-      - "--port"
-      - "8080"
-      - "--n-gpu-layers"
-      - "99"           # 全部层放 GPU，如需 CPU offload 调低此值
-      - "--ctx-size"
-      - "8192"
-      - "--threads"
-      - "8"
-      - "--batch-size"
-      - "512"
-      - "--parallel"
-      - "4"            # 并发请求槽位
-    expose:
-      - "8080"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 120s   # 模型加载需要时间
     networks:
       - main
     restart: unless-stopped
@@ -164,8 +117,8 @@ services:
       MINIO_ADDRESS: milvus-minio:9000
     volumes:
       - /data/volumes/milvus/data:/var/lib/milvus
-    expose:
-      - "19530"
+    ports:
+      - "127.0.0.1:19530:19530"   # 仅本机可访问(开发期 ETL/测试需要),生产部署改回 expose 即可
     depends_on:
       milvus-etcd:
         condition: service_healthy
@@ -192,32 +145,13 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - /data/volumes/postgres:/var/lib/postgresql/data
-    expose:
-      - "5432"
+    ports:
+      - "127.0.0.1:5432:5432"     # 仅本机可访问
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - main
-    restart: unless-stopped
-    logging: *default-logging
-
-  # ── 数据层：MongoDB ──
-  mongo:
-    image: mongo:7
-    container_name: mongo
-    volumes:
-      - /data/volumes/mongo:/data/db
-    expose:
-      - "27017"
-    healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
     networks:
       - main
     restart: unless-stopped
@@ -229,8 +163,8 @@ services:
     container_name: redis
     volumes:
       - /data/volumes/redis:/data
-    expose:
-      - "6379"
+    ports:
+      - "127.0.0.1:6379:6379"     # 仅本机可访问
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -294,6 +228,45 @@ services:
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
     depends_on:
       - loki
+    networks:
+      - main
+    restart: unless-stopped
+    logging: *default-logging
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--path.rootfs=/host"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host:ro,rslave
+    expose:
+      - "9100"
+    networks:
+      - main
+    restart: unless-stopped
+    logging: *default-logging
+
+  dcgm-exporter:
+    image: nvcr.io/nvidia/k8s/dcgm-exporter:latest
+    container_name: dcgm-exporter
+    environment:
+      DCGM_EXPORTER_LISTEN: ":9400"
+      DCGM_EXPORTER_KUBERNETES: "false"
+    expose:
+      - "9400"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     networks:
       - main
     restart: unless-stopped

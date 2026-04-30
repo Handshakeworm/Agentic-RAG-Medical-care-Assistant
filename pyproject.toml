@@ -1,0 +1,45 @@
+[project]
+name = "medical-rag"
+version = "0.1.0"
+description = "Agentic RAG for medical care assistant"
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    # 数据库客户端
+    "pymilvus>=2.5.0,<2.6",                # 必须与 docker-compose Milvus v2.5.9 对应
+    "psycopg[binary]>=3.2",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "redis>=5.0",
+
+    # 模型推理(RTX 5070 Ti Blackwell 必须 PyTorch>=2.7)
+    "torch>=2.7",
+    "transformers>=4.45",
+    "sentence-transformers>=3.0",
+    "FlagEmbedding>=1.3",
+    "accelerate>=1.0",
+    "bitsandbytes>=0.45",                  # 8bit 量化(16GB 卡跑 8B Embedding 必需)
+
+    # 工具
+    "python-dotenv>=1.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "tenacity>=9.0",
+    "pandas>=2.2",                         # ICD-10 Excel 解析、评测数据处理
+    "openpyxl>=3.1",                       # pandas 读 .xlsx 引擎
+
+    # 测试
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.uv]
+# 默认 PyPI + PyTorch 官方 cu126 索引(Blackwell 兼容)
+extra-index-url = ["https://download.pytorch.org/whl/cu126"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]

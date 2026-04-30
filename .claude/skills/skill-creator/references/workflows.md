@@ -1,28 +1,28 @@
-# Workflow Patterns
+# 工作流程模式
 
-## Sequential Workflows
+## 顺序工作流程
 
-For complex tasks, break operations into clear, sequential steps. It is often helpful to give the agent an overview of the process towards the beginning of SKILL.md:
+对于复杂任务，将操作拆分为清晰的顺序步骤。在 SKILL.md 开头部分给出流程概览通常很有帮助：
 
 ```markdown
-Filling a PDF form involves these steps:
+填写 PDF 表单包含以下步骤：
 
-1. Analyze the form (run analyze_form.py)
-2. Create field mapping (edit fields.json)
-3. Validate mapping (run validate_fields.py)
-4. Fill the form (run fill_form.py)
-5. Verify output (run verify_output.py)
+1. 分析表单（运行 analyze_form.py）
+2. 创建字段映射（编辑 fields.json）
+3. 验证映射（运行 validate_fields.py）
+4. 填写表单（运行 fill_form.py）
+5. 验证输出（运行 verify_output.py）
 ```
 
-## Conditional Workflows
+## 条件工作流程
 
-For tasks with branching logic, guide the agent through decision points:
+对于包含分支逻辑的任务，引导智能体通过决策点：
 
 ```markdown
-1. Determine the modification type:
-   **Creating new content?** → Follow "Creation workflow" below
-   **Editing existing content?** → Follow "Editing workflow" below
+1. 确定修改类型：
+   **创建新内容？** → 按照下方"创建工作流程"执行
+   **编辑现有内容？** → 按照下方"编辑工作流程"执行
 
-2. Creation workflow: [steps]
-3. Editing workflow: [steps]
+2. 创建工作流程：[步骤]
+3. 编辑工作流程：[步骤]
 ```

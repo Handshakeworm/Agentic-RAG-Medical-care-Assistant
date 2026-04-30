@@ -1,3 +1,18 @@
 .venv/
 mineru_output/
 非项目本体/
+
+# 本地环境与密钥（务必勿提交，含 LLM API Key、JWT Secret 等）
+.env
+.env.local
+.env.*.local
+
+# Python 临时产物
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# 编辑器/系统
+.DS_Store
