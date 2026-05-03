@@ -648,7 +648,7 @@ class AdviceCompletenessScore(BaseModel):
 | `final_prompt` | TEXT | **新 State 字段** | `s["last_diagnose_prompt"]`（正常诊断 NULL；仅 ⑩ 失败兜底路径填值） |
 | `llm_raw_output` | TEXT | **新 State 字段** | `s["last_diagnose_raw_output"]`（正常诊断 NULL；仅 ⑩ 失败兜底路径填值） |
 | `final_response` | TEXT | State | `s["final_response"]` |
-| `model_name` | VARCHAR(64) | config | `settings.llm.diagnose_model_name`（或 §7 Prompt 模板约定的默认模型标识；诊断节点用的 LLM） |
+| `model_name` | VARCHAR(64) | config | `settings.llm.MODEL_NAME`（诊断节点用的 LLM;MVP 全流程共用单一模型,后期需要按节点分流时再扩展 settings.llm 子字段） |
 | `token_usage` | JSONB | **新 State 字段** | `s["session_token_usage"]`（`RetryObserver.on_llm_end` 累加；初始全 0） |
 | `latency_ms` | JSONB | **新 State 字段（需求和 total）** | `{**s["session_latency_ms"], "total": sum(s["session_latency_ms"].values())}` |
 | `error_info` | JSONB | State 派生 | `_build_error_info(s["diagnosis_result"])`（见 §9.6.3 规则） |
@@ -751,7 +751,7 @@ async def diagnose(req: DiagnoseRequest,
         final_prompt=s["last_diagnose_prompt"],      # 正常时 None → DB NULL
         llm_raw_output=s["last_diagnose_raw_output"],# 正常时 None → DB NULL
         final_response=s["final_response"],
-        model_name=settings.llm.diagnose_model_name,
+        model_name=settings.llm.MODEL_NAME,
         token_usage=s["session_token_usage"],
         latency_ms={
             **s["session_latency_ms"],

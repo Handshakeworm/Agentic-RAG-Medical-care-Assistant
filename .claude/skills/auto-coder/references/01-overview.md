@@ -29,7 +29,7 @@
       2.4.1 Milvus 医学文献向量库
       2.4.2 PostgreSQL 元数据存储
       2.4.3 PostgreSQL 会话与对话记录
-      2.4.4 MongoDB 原始文档存储
+      2.4.4 原始文档存储：PostgreSQL raw_documents 表
       2.4.5 PostgreSQL 病人信息
       2.4.6 Milvus 术语向量库
 
@@ -85,7 +85,7 @@
 ```
 Agentic-RAG-Medical-care-Assistant/
 │
-├── docker-compose.yml                  # 容器编排（共 14 个）：nginx, api, Milvus（standalone+etcd+minio）, PostgreSQL, MongoDB, Redis, Prometheus, Grafana, Loki, Promtail, Node Exporter, DCGM Exporter（LLM 推理通过云端 API 调用）
+├── docker-compose.yml                  # 容器编排（共 13 个）：nginx, api, Milvus（standalone+etcd+minio）, PostgreSQL, Redis, Prometheus, Grafana, Loki, Promtail, Node Exporter, DCGM Exporter（LLM 推理通过云端 API 调用）
 ├── .env.example                        # 环境变量模板（不提交 .env）
 ├── .gitignore
 ├── pyproject.toml                      # 项目依赖与构建配置
@@ -93,8 +93,7 @@ Agentic-RAG-Medical-care-Assistant/
 ├── DEV_SPEC.md                         # 技术文档
 │
 ├── config/                             # 静态配置文件
-│   ├── settings.py                     # 全局配置（从环境变量/文件加载）
-│   ├── model_config.py                 # 模型配置：Qwen3-Embedding-8B、Reranker、DashScope API 配置
+│   ├── settings.py                     # 全局配置（含模型配置 EmbeddingSettings/RerankerSettings/LLMSettings,从 .env 加载）
 │   ├── milvus_schema.py                # Milvus Collection Schema 定义（docs_collection + terms_collection）
 │   └── logging_config.py               # 日志格式与 Promtail 适配
 │
@@ -123,7 +122,7 @@ Agentic-RAG-Medical-care-Assistant/
 │   ├── agent/                          # Agent 编排层（LangGraph StateGraph）
 │   │   ├── __init__.py
 │   │   ├── graph.py                    # StateGraph 定义：节点注册、边与条件边连接
-│   │   ├── state.py                    # MedicalState Schema（TypedDict）+ create_initial_state 工厂函数
+│   │   ├── state.py                    # MedicalState Schema（Pydantic BaseModel）+ 嵌套 BaseModel + create_initial_state 工厂
 │   │   ├── nodes/                      # 各节点实现
 │   │   │   ├── __init__.py
 │   │   │   ├── info_collect.py         # 节点 ①：主诉提取 + 病史/报告加载（单轮无交互）
@@ -168,7 +167,7 @@ Agentic-RAG-Medical-care-Assistant/
 │   │   ├── ingestion/                  # 3.1 数据摄取
 │   │   │   ├── __init__.py
 │   │   │   ├── mineru_loader.py        # 3.1.1 MinerU 产物加载（读取 markdown + content_list）
-│   │   │   ├── chunking.py             # 3.1.2 父子分块：先按 heading 切父块，再 RecursiveCharacterTextSplitter 切子块
+│   │   │   ├── chunking.py             # 3.1.2 父子分块：目录权威清单 + 节内三遍切【】+(一)+1. + size 驱动子块切
 │   │   │   ├── enrichment.py           # 3.1.3 LLM 增强（title/summary/tags/questions）
 │   │   │   ├── idempotency.py          # 3.1.4 幂等性：source_id / heading_path_id / chunk_id（含父块 "parent" 约定）/ content_hash
 │   │   │   ├── embedding.py            # 3.1.5 多向量 Embedding（Dense: Qwen3-Embedding-8B, Sparse: Milvus BM25）
@@ -197,7 +196,7 @@ Agentic-RAG-Medical-care-Assistant/
 │   │   ├── postgres/
 │   │   │   ├── __init__.py
 │   │   │   ├── connection.py           # PostgreSQL 连接池
-│   │   │   ├── models.py               # ORM 模型（sources, chunks, users, patients, conversations 等）
+│   │   │   ├── models.py               # ORM 模型（sources, raw_documents, chunks, users, patients, conversations 等）
 │   │   │   ├── metrics.py              # SQLAlchemy 事件订阅 → Prometheus Histogram（依赖层指标，§5.2.1 ③）
 │   │   │   └── migrations/             # 数据库迁移脚本（Alembic）
 │   │   │       └── ...
@@ -207,10 +206,6 @@ Agentic-RAG-Medical-care-Assistant/
 │   │   │   ├── client.py               # 统一调用封装 + Prometheus Histogram（依赖层指标，§5.2.1 ③）
 │   │   │   ├── docs_collection.py      # 医学文献向量库操作（2.4.1）
 │   │   │   └── terms_collection.py     # 术语向量库操作（2.4.6）
-│   │   ├── mongo/
-│   │   │   ├── __init__.py
-│   │   │   ├── connection.py           # MongoDB 连接管理
-│   │   │   └── raw_documents.py        # raw_documents Collection 操作（2.4.4）
 │   │   └── redis/
 │   │       ├── __init__.py
 │   │       └── cache.py                # Redis 缓存（仅配置缓存，MVP 阶段不做 RAG 响应缓存，见 §5.1）
@@ -227,21 +222,9 @@ Agentic-RAG-Medical-care-Assistant/
 │       ├── hashing.py                 # SHA256 工具（chunk_id、content_hash、heading_path_id）
 │       └── metrics.py                 # Prometheus 指标埋点
 │
-├── terms/                             # 术语词典数据（2.4.6 数据来源）
-│   ├── chip_cblue/                    # CHIP/CBLUE 口语→标准术语数据集
-│   ├── icd10_cn/                      # ICD-10-CN 国家医保局临床版
-│   ├── cmesh/                         # CMeSH 中国医学主题词表
-│   └── build_terms.py                 # 术语库构建脚本（→ terms_collection）
-│
-├── data/                              # 数据目录（.gitignore 排除）
-│   ├── raw_pdfs/                      # 原始 PDF 指南/教材
-│   └── mineru_output/                 # MinerU 解析产物
-│       └── {document_name}/auto/
-│           ├── images/
-│           ├── {document_name}.md
-│           ├── {document_name}_content_list.json
-│           ├── {document_name}_middle.json
-│           └── {document_name}_model.json
+├── terms/                             # 术语库构建脚本(项目内代码;原始数据走数据卷,见目录树后说明)
+│   └── build_icd10.py                 # ICD-10 灌库脚本(→ terms_collection)
+│                                      # CMeSH 等其他术语来源 YAGNI,按需补
 │
 ├── evaluation/                        # 6. 评估系统
 │   ├── __init__.py
@@ -272,7 +255,7 @@ Agentic-RAG-Medical-care-Assistant/
 │   ├── init_db.py                     # 初始化 PostgreSQL 表结构 + 索引
 │   ├── init_milvus.py                 # 初始化 Milvus Collection + 索引
 │   ├── ingest.py                      # 文档摄取入口（调用 rag.ingestion.pipeline）
-│   └── seed_terms.py                  # 术语库初始导入
+│   └── batch_parse_pdfs.sh            # 批量 mineru 解析 raw-pdf/ 下所有 PDF(幂等,跳过已完成)
 │
 └── tests/
     ├── unit/
@@ -290,6 +273,9 @@ Agentic-RAG-Medical-care-Assistant/
         ├── test_agent_workflow_e2e.py  # J3
         └── test_api_e2e.py             # J4
 ```
+
+> 本节只描述项目目录(代码)。原始数据、模型权重、解析产物等本机路径全部由 `.env` 配置,见 `.env.example`,spec 不重复列出。
+
 ### 1.3.2 目录与文档章节对应关系
 
 | DEV_SPEC 章节 | 对应目录 |
@@ -300,7 +286,7 @@ Agentic-RAG-Medical-care-Assistant/
 | 2.4.1 Milvus 医学文献向量库 | `src/db/milvus/docs_collection.py` |
 | 2.4.2 PostgreSQL 元数据存储 | `src/db/postgres/` |
 | 2.4.3 PostgreSQL 会话与对话记录 | `src/db/postgres/models.py` → sessions / conversations |
-| 2.4.4 MongoDB 原始文档存储 | `src/db/mongo/raw_documents.py` |
+| 2.4.4 原始文档存储 raw_documents 表 | `src/db/postgres/models.py`（raw_documents ORM 类） |
 | 2.4.5 PostgreSQL 病人信息 | `src/db/postgres/models.py` → patients 等 |
 | 2.4.6 Milvus 术语向量库 | `src/db/milvus/terms_collection.py` + `terms/` |
 | 3.1.1 MinerU 数据加载 | `src/rag/ingestion/mineru_loader.py` |
@@ -358,7 +344,7 @@ Agentic-RAG-Medical-care-Assistant/
 
 - 向量存储：Milvus（Dense + Sparse 向量，容器化部署，由 `milvus-standalone` + `milvus-etcd` + `milvus-minio` 三个容器组成）（`src/db/milvus/`）
 - 元数据存储：PostgreSQL（Chunk 元数据、来源文档、医学术语等）（`src/db/postgres/`）
-- 原始文档存储：MongoDB（MinerU 解析后的原始文档）（`src/db/mongo/`）
+- 原始文档存储：PostgreSQL `raw_documents` 表（MinerU 解析后的原始文档，与 `sources` 同库）（`src/db/postgres/`）
 - 缓存：Redis（FAQ、热点查询等）（`src/db/redis/`）
 
 **日志与监控层**
@@ -414,15 +400,13 @@ graph TB
             etcd["etcd<br/><i>元数据</i>"]
             minio["minio :9000<br/><i>对象存储</i>"]
         end
-        postgres["postgres<br/><i>元数据 · Chunk/术语/患者</i>"]
-        mongo["mongo<br/><i>原始文档 · MinerU 解析结果</i>"]
+        postgres["postgres<br/><i>元数据 · Chunk/术语/患者 · 原始文档(MinerU 产物)</i>"]
         redis["redis<br/><i>缓存 · FAQ/热点查询</i>"]
     end
 
     api -->|"HTTPS"| cloudapi
     api -->|"TCP 19530"| standalone
     api -->|"TCP 5432"| postgres
-    api -->|"TCP 27017"| mongo
     api -->|"TCP 6379"| redis
 
     subgraph 监控层["监控容器组（独立，故障不影响主服务）"]
@@ -454,5 +438,5 @@ graph TB
 
 容器清单（共 14 个）：
 - **主链路**：nginx → api（LLM 推理通过 DashScope 云端 API 调用，不占本地容器）
-- **数据层**：milvus-standalone、milvus-etcd、milvus-minio、postgres、mongo、redis
+- **数据层**：milvus-standalone、milvus-etcd、milvus-minio、postgres、redis
 - **监控层**：prometheus、grafana、loki、promtail、node-exporter、dcgm-exporter

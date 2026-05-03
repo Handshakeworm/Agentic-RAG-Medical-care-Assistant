@@ -1,20 +1,24 @@
-"""scripts/smoke_terms_retrieval.py — terms_collection 向量召回冒烟测试。
+"""tests/integration/test_terms_retrieval_smoke.py — terms_collection 召回冒烟测试。
 
 用 Qwen3-Embedding-8B(8bit)对一组典型患者口语 query 做编码,
-在 terms_collection 里检索 Top-5,人工肉眼验证是否命中预期标准术语。
+在 terms_collection 里检索 Top-5,**人工肉眼验证**是否命中预期标准术语。
 
-运行:
-    python -m scripts.smoke_terms_retrieval
+行为权威:DEV_SPEC §2.4.6(terms_collection schema + 检索)
+查看输出:`pytest -s tests/integration/test_terms_retrieval_smoke.py`
+
+资源:Embedding 8B int8 ≈ 8.5GB GPU 显存;**与 mineru 不能并发**(会 OOM)。
 """
 
 from __future__ import annotations
 
 import os
 
-from sentence_transformers import SentenceTransformer
-from transformers import BitsAndBytesConfig
+import pytest
 
-from src.db.milvus.terms_collection import count_aliases, search_aliases
+pytestmark = pytest.mark.skipif(
+    not os.path.isdir(os.getenv("EMBEDDING_MODEL_PATH", "")),
+    reason="EMBEDDING_MODEL_PATH 未指向已下载的 Qwen3-Embedding-8B 权重目录",
+)
 
 
 # (query, 期望命中的 preferred_term 关键词或 ICD 段)— 人工对照用
@@ -33,7 +37,10 @@ QUERIES: list[tuple[str, str]] = [
 ]
 
 
-def load_model() -> SentenceTransformer:
+def _load_model():
+    from sentence_transformers import SentenceTransformer
+    from transformers import BitsAndBytesConfig
+
     bnb = BitsAndBytesConfig(load_in_8bit=True)
     return SentenceTransformer(
         os.environ["EMBEDDING_MODEL_PATH"],
@@ -41,11 +48,14 @@ def load_model() -> SentenceTransformer:
     )
 
 
-def main() -> None:
-    print(f"=== terms_collection 当前 entities: {count_aliases()} ===")
+def test_terms_retrieval_smoke() -> None:
+    """召回冒烟,无断言,人工眼鉴 print 输出。pytest -s 可见。"""
+    from src.db.milvus.terms_collection import count_aliases, search_aliases
+
+    print(f"\n=== terms_collection 当前 entities: {count_aliases()} ===")
 
     print("\n=== 加载 Embedding(8bit) ===")
-    model = load_model()
+    model = _load_model()
     print("✓ 模型加载完成")
 
     for q, expected in QUERIES:
@@ -59,7 +69,3 @@ def main() -> None:
                 f"preferred=「{r['preferred_term']}」  "
                 f"alias=「{r['alias']}」"
             )
-
-
-if __name__ == "__main__":
-    main()

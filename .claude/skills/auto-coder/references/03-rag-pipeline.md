@@ -16,18 +16,18 @@
 
 #### MinerU 输出结构
 
-通过命令行运行 MinerU 解析后，输出目录结构如下：
+通过命令行运行 MinerU 解析后，输出目录结构如下(子目录名随 backend 而变,hybrid-auto-engine → `hybrid_auto/`,vlm-auto-engine → `vlm_auto/`,pipeline → `pipeline_auto/`):
 
 ```
-/project_folder/mineru_output/target_document/auto/
-├── images/                              # 提取的图片资源
-├── target_document_content_list.json    # 内容列表
-├── target_document_origin.pdf           # 原始 PDF
-├── target_document_middle.json          # 中间解析结果
-├── target_document_model.json           # 模型输出
-├── target_document_span.pdf             # 跨度标注
-├── target_document_layout.pdf           # 版面分析
-└── target_document.md                   # 最终 Markdown 输出
+/project_folder/mineru_output/target_document/{backend}_auto/
+├── images/                                   # 提取的图片资源(SHA 命名)
+├── target_document.md                        # 最终 Markdown 输出(给人预览,不直接灌库)
+├── target_document_content_list_v2.json      # ⭐ 下游 chunking 实际消费(页级嵌套,块带完整语义)
+├── target_document_content_list.json         # v1 扁平结构(向后兼容,本项目不消费)
+├── target_document_middle.json               # 中间解析结果(含 spans/score/lines,体积大,默认仅留磁盘不入库)
+├── target_document_model.json                # 模型原始推理(归一化 bbox,默认仅留磁盘不入库)
+├── target_document_origin.pdf                # 原始 PDF 拷贝
+└── target_document_layout.pdf                # 版面分析框图(肉眼检查用)
 ```
 
 #### 多类型内容处理策略
@@ -77,36 +77,184 @@
 >
 > 患者实时上传的检查报告走独立路径（见 Agent ①.5 / ⑨），Vision LLM 直读并结构化为 `report_findings`，与本节知识库摄取不共用机制。
 
+#### MinerU 解析的已知限制与下游补救
+
+实测 hybrid-auto-engine 在医学教科书上整体质量优秀(表格 HTML 行列完整、caption/footnote 单独成字段、chart 把曲线图 OCR 成 markdown 数据表、page_header/footer/number 单独识别可干净过滤),但有两处**系统性限制**需要在加载/切分阶段主动处理。这两点不是某本书的特例,换 backend 或重跑无法解决,**必须在代码层补救**。
+
+**限制 1:image 块的 `content` 字段约 50% 含 VLM 幻觉(loader 阶段补救)**
+
+MinerU 对 `sub_type=text_image`(含文字的图片)会调用 VLM 自动生成 `content` 字段,实测 50% 是无意义重复(如把"获取数字资源步骤页"识别成 "1. 体验智能学习, 2-99. 站体教学")。`natural_image / flowchart` 类相对可靠但仍不可信。
+
+**应对**:`mineru_loader.py` 加载时对所有 `type=image` 的块**直接丢弃 content 字段**,只保留 `image_caption / image_footnote / bbox / image_source.path`。本设计与上文"图像内容理解的设计原则"一致(不依赖 Vision LLM 概率性输出)。
+
+注意:`type=table` 和 `type=chart` 块的 `content` 字段必须**保留**(分别是 HTML 表格和 markdown 数据表,质量高且为信息核心载体)。仅 `type=image` 丢弃 content。
+
+**限制 2:`title.level` 全部退化为 1(已弃案:正则重建 → 改用目录权威清单)**
+
+MinerU 输出的 `content_list_v2.json` 中所有 title 块的 `level` 字段统一是 1,丢失原始多级标题结构。同时实测还发现:**同一格式的 anchor 在同一书内被 mineru 标 type=title 还是 type=paragraph 完全不一致**(POC §1.3 bug 5),导致即使"按文本正则重建 level"也补救不全。
+
+**已弃案**:早期方案是按文本正则匹配重建 level(篇/章/节/数字编号 → L1/L2/L3/L4),但 POC 验证发现:
+- 不同书的章节命名约定差异极大(《临床用药指南》99.9% fallback 因每药品名独成 title),正则归级跨书不可复用
+- 即使本书命中率 80%,production code 维护代价过高
+- 节内子节(【】/(一)/1.) mineru type 标记完全不可信,正则重建解决不了节内切分问题
+
+**新方案**(2026-05-03 用户拍板):**完全放弃 mineru `title.level`,改用"目录权威清单"思路** —— 从 mineru 目录页(`page_header` 含"目录")抽出本书完整目录结构作为唯一层级真值,正文匹配时 fuzzy match 到目录条目得到权威 level/heading_path。详见 §3.1.2 切分主流程。
+
+**给消费者的结论**:任何 chunking / 父子索引代码都不应该读 `title.level` 字段(永远是 1,无意义)。父块层级与边界由"目录字典 + 正文匹配"决定。
 
 
 
 
+## 3.1.2 chunking(目录权威清单 + 三遍切 + size 驱动子块)
 
+**核心方法论**(2026-05-03 经《内分泌代谢病学第4版上册》POC 验证):
 
-## 3.1.2 chunking（LangChain 负责切分；独立、可控）
+- **完全不依赖 mineru `title.level`**(永远是 1,无意义,见 §3.1.1 限制 2)
+- **不用 `RecursiveCharacterTextSplitter`**(已弃案)
+- 父块由"书的目录结构"切(节 + 节内三遍切【】+(一)+1.),子块由"父块大小"切(size 累积驱动)
+- 父子结构**仅对真正大的父块有意义**:小父块直接当 child(避免 degenerate "父=子")
+- POC 实现与详细方法论见 [`scripts/poc_chunking_endocrinology_v4/METHODOLOGY.md`](scripts/poc_chunking_endocrinology_v4/METHODOLOGY.md);production 实现位 `src/rag/ingestion/chunking.py`(待 port)
 
-实现方案：使用 LangChain 的 `RecursiveCharacterTextSplitter` 进行切分。
-优势：该方法对 Markdown 文档的结构（标题、段落、列表、代码块）有天然的适配性，能够通过配置语义断点（Separators）实现高质量、语义完整的切块。
-输入：Loader 产出的 Markdown Document。
-输出：若干 Chunk（或 Document-like chunks），每个 chunk 必须携带稳定的定位信息与来源信息：source, chunk_index, start_offset/end_offset（或等价定位字段）。
+### Block 白名单与文本抽取规则(消费 `content_list_v2` 前必读)
 
-### 父子索引（Small-to-Big 检索模式）
+`raw_documents.content_list` 的真实结构与 10 种 `block.type` 见 §2.4.4.1。chunking 阶段**必须**按下表分类处理。
 
-**设计动机**：医疗知识天然分层（疾病 → 亚型 → 治疗方案 → 剂量/禁忌）。小块精确命中"剂量"时，禁忌证可能在同节另一小块，导致危险遗漏。父块作为完整上下文的兜底锚点，确保临床信息的完整性。
+**白名单(进入 chunking pipeline 的 6 种 type)**:
 
-**实现策略**：
-1. **先切父块**：在执行 `RecursiveCharacterTextSplitter` 之前，按 heading 边界切出父块（heading 节全文），写入 `chunks` 表，`parent_chunk_id = NULL`，**不做向量化**（仅作内容存储）。
-2. **再切小块**：对父块内容执行 `RecursiveCharacterTextSplitter`，生成子块，记录 `parent_chunk_id` 指向所属父块。子块正常进行多向量 Embedding（见 3.1.5）。
-3. **顶层兜底**：若某小块无对应 heading 父块（文档开头无标题的散文片段），则 `parent_chunk_id = NULL`，精排后父块扩展阶段直接使用该小块原文。
-4. **父块 ID 生成**：父块使用与子块相同的 `heading_path_id` 方案生成稳定 `chunk_id`，幂等逻辑不变。
-5. **Milvus 不变**：父块不写入 Milvus，向量检索仍仅针对子块。
+| type | 抽取规则(从 `block.content` 取正文) | 用途 |
+|---|---|---|
+| `title` | 拼 `title_content[].content`(`type=text` 子项)。**忽略 `level` 字段**(永远 1,见 §3.1.1 限制 2),改用目录权威清单匹配确定 level | 父块边界候选(节级匹配)+ 节内子标题边界候选(【】/(一)/1. 正则) |
+| `paragraph` | 拼 `paragraph_content[].content`(`type=text` 子项) | 父块/子块的正文输入 |
+| `list` | 递归遍历 `list_items[].item_content[].content`(深 4 层),按 `list_type` 决定是否加 `1./- ` 前缀。**整体作为不可分语义单元**,首项 `1.` 不当子标题切点 | 父块/子块累积输入 |
+| `table` | `table_caption` + `html` + `table_footnote`,**双粒度**:① 整表摘要 chunk(LLM 改写 → 一句"这张表讲什么")② 逐行 chunk(parse HTML 把每行转自然语言句子) | 整表 chunk + N 个行 chunk,共享 `parent_chunk_id` |
+| `chart` | `chart_caption` + `content`(content 已是 markdown 数据表) | 同 table 双粒度 |
+| `equation_interline` | `math_content`(latex 字符串)+ 上下文 paragraph | 不单独成 chunk,作为所在父块 inline 内容 |
+
+**黑名单(直接丢弃,不进 chunks 表)**:
+
+| type | 丢弃理由 |
+|---|---|
+| `page_header` / `page_footer` / `page_number` | 页眉/脚/页码,与正文无关 |
+| `image` | content 字段 50% VLM 幻觉(§3.1.1 限制 1);`image_caption/bbox` 在 raw_documents 保留供版面追溯,但不进 chunks |
+
+**实现位置**:`src/rag/ingestion/chunking.py::extract_chunkable_text(block) -> str | None` 已实现 block 抽取适配器,返回 None 即跳过。
+
+### 切分主流程(4 步)
+
+#### Step 1:目录权威清单提取
+
+扫 `content_list_v2` 的目录页(`page_header` 含"目录"的页),对所有 paragraph/title/list block 抽行,按本书的 anchor pattern 分级(L1 篇 / L2 章 / L3 节 / L4 数字编号):
+
+- 跨条目粘连拆分(mineru 会把"第2节...56第3节..."焊一行)
+- 黑名单剔除("上册/下册/全书概览/目录")
+- normalize:删 `\n` 残留,折叠空白,剥页码尾,合并节号
+- strict_key:进一步去掉所有空白(应对 mineru 中文/ASCII 间空格风格不一致)
+
+输出:`{normalized_title: (level, parent_path)}` 字典,作为后续匹配的权威真值。
+
+**注意**:不同书的 anchor pattern 差异大(《用药指南》是药典结构,99.9% 命中失败),每本书需单独适配 pattern。
+
+#### Step 2:正文节边界匹配(REAL_START 选取)
+
+正文范围 `page_idx > max(toc_pages)`,对每个 type=title block 做 strict_key 匹配字典,加 3 类预处理:
+
+- **A1 章合并**:mineru 把"第N章"和"章名"拆成两个 title block,合并
+- **A2 篇前缀重建**:篇标题丢失"第N篇"前缀,从字典 L1 反查 alias 补回
+- **A3 mini-TOC paragraph**:扩展资源等被标 paragraph,严格双条件采纳(末尾带页码 + 命中字典)
+
+每个字典 title 在正文里可能出现多次(章/篇页 mini-TOC + 真章节起始),按以下规则选 REAL_START:
+1. 优先级 1:按文档顺序最后一个满足"强信号"的 match(`PART_REBUILT/CHAP_MERGED` 或 `AS_IS gap_chars≥50`)
+2. 优先级 2:都没强信号 → 取最后一次出现位置
+
+输出:159 个节起点位置(节级原父块边界)。
+
+#### Step 3:全书层面截断 + 节内参考文献丢弃
+
+**书末截断**:扫 flat block 序列,第一个命中 `BODY_END_MARKERS = ('中文名词索引', '英文缩略语索引', '彩色插图')` 的 title 即截断,后续全丢。
+
+**参考文献丢弃**:节内扫到 `^参考文献\s*$` 标题即截断,该位置及之后的所有 block 全部丢弃(包括 ref 条目 + 紧随其后的扩展资源占位列表)。理由:英文学术 ref 与中文医学查询语义不匹配,扩展资源是外部链接占位,均无 RAG 召回价值。
+
+#### Step 4:父块构建(节内三遍切 + 严格层级合并)
+
+每个节本身就是默认父块。如果节字符 > **`PARENT_SPLIT_THRESHOLD = 4000`**,启动三遍逐级细化:
+
+| Pass | 触发 | 加边界 pattern | level |
+|---|---|---|---|
+| 1 | 段 > 4000 字 | `^【.+?】` | 1 (BRACE) |
+| 2 | Pass 1 后段仍 > 4000 字 | `^[（(][一二三四五六七八九十百]+[)）]` | 2 (PAREN) |
+| 3 | Pass 2 后段仍 > 4999 字 | `^\d+\s*[.、]\s` | 3 (NUM) |
+
+排除:`type=list` block(整体语义单元)、`^表/图\s*[\d-]+`、长度 < 4 字符的残片。
+
+**小父块合并**(< **`PARENT_MERGE_TINY_THRESHOLD = 500`** 字):
+
+严格按层级关系。**吸收方 level ≤ 被吸收方 level**:
+- Forward: `cur_level ≤ next_level`(允许同级兄弟、上级吸子主题、节首段;禁止下级跨上级)
+- Backward: `prev_level ≤ cur_level`
+
+例:1./2. 不能跨 (一)、(一) 不能跨【】合并;但同节下【】兄弟可以合并(同节都算相关主题)。
+
+#### Step 5:子块构建(size 驱动)
+
+每个父块独立判断:
+
+- **父块 ≤ `CHILD_SPLIT_THRESHOLD = 1200` 字**:**不切**,1 child = parent 整段(避免 degenerate)
+- **父块 > 1200 字**:按 mineru block 累积切多 child,目标 `CHILD_TARGET_SIZE = 600` 字
+  - 算法:每加一个 block 看"加 vs 不加"哪个 acc_len 更接近 target,选更近的
+  - 强制最小 `CHILD_MIN_SIZE = 200` 字:当前累积 < 200 时无视距离判断,force-add 防止孤儿
+  - 末段 < target/2 时 backward 并入上一 child
+  - 单 mineru block 即使 > target 也独立成 child(block 是不可分的最小语义单元)
+
+子块切分**完全不用标题 pattern**,只看大小 + mineru block 边界。这样父块切法和子块切法解耦,避免 degenerate。
+
+### 关键阈值(目标 ~3000 token 父块,~600 字子块)
+
+实测 Qwen tokenizer 1 token ≈ 1.39 字符。
+
+| 常量 | 值 | 用途 |
+|---|---|---|
+| `PARENT_SPLIT_THRESHOLD` | 4000 字(~2877 token) | 父块切【】+(一)阈值 |
+| `PARENT_PASS3_THRESHOLD` | 5000 字(~3597 token) | 父块切 1./2. 阈值(稍宽,避免过切) |
+| `PARENT_MERGE_TINY_THRESHOLD` | 500 字 | 小父块合并阈值 |
+| `CHILD_SPLIT_THRESHOLD` | 1200 字(~864 token) | 父块 ≤ 此值不切子块 |
+| `CHILD_TARGET_SIZE` | 600 字(~432 token) | 大父块切子块的目标 size |
+| `CHILD_MIN_SIZE` | 200 字 | 子块强制最小,< 此值 force-add 防孤儿 |
+
+### 父子索引(Small-to-Big 检索模式)
+
+**设计动机**:医疗知识天然分层(疾病 → 亚型 → 治疗方案 → 剂量/禁忌)。小块精确命中"剂量"时,禁忌证可能在同节另一小块,导致危险遗漏。父块作为完整上下文的兜底锚点,确保临床信息的完整性。
+
+**实现策略**:
+1. **父块**:按上述 Step 4 切分,写入 `chunks` 表,`parent_chunk_id = NULL`,**不做向量化**(`embedding_status='skip'`,仅作内容存储)
+2. **子块**:按 Step 5 size 驱动切,记录 `parent_chunk_id` 指向所属父块。子块正常进行多向量 Embedding(见 3.1.5)
+3. **顶层兜底**:文档开头无标题的散文片段(罕见),`parent_chunk_id = NULL`,精排后直接使用该小块原文
+4. **父块 ID 生成**:父块使用与子块相同的 `heading_path_id` 方案 + 后缀("parent")生成稳定 `chunk_id`,幂等逻辑见 §3.1.4
+5. **Milvus 不变**:父块不写入 Milvus,向量检索仅针对子块
+6. **不变量**:total_parent_len == total_child_len(父子内容完整守恒,任何切分逻辑改动后必须验证 mismatch=0)
+
+### 数据快照(本书 POC 结果,2026-05-03)
+
+| 指标 | 值 |
+|---|---|
+| 节数(节级原父块) | 159 |
+| 父块数(三遍切+合并后) | 1204 |
+| 父块 size median / max | 1346 / 5218 字 |
+| 子块数 | 3012 |
+| 子块 size median / max | 616 / 1528 字 |
+| 书末截断丢弃 | 1676 blocks / 20721 字 |
+| 参考文献丢弃 | 607 blocks / 16257 字 |
+| 父子覆盖完整性 | mismatch=0 (1932461 字) |
 
 
 ## 3.1.3 Transform & Enrichment（结构转换与深度增强）
 
 ### 3.1.3.1 结构转换
 
-`RecursiveCharacterTextSplitter` 的输出为 `List[Document]`，每个 `Document` 对象包含 `page_content`（`str`）与基础 `metadata`（`dict`）。本步骤将 `page_content` 与各阶段元数据整合，写入 `chunks` 表（字段定义详见 2.4 数据存储设计 → chunks 表）。
+§3.1.2 chunking 主流程的输出是两类 dict 列表:
+- `parents: list[ParentChunk]` — 父块,每条含 `parent_idx / section_title / level / title / head / pg_start / len`
+- `children: list[ChildChunk]` — 子块,每条含 `parent_idx / section_title / head / pg_start / len / blocks`
+
+本步骤将 chunk 文本与各阶段元数据整合,写入 `chunks` 表(字段定义详见 §2.4 → chunks 表)。父块 `embedding_status='skip'`,子块进入下游 enrichment / embedding pipeline。
 
 ### 3.1.3.2 增强策略
 
@@ -475,11 +623,13 @@ Cross-Encoder 精排**不在 `retrieve` ③ 中调用**。检索阶段（`retrie
 **默认策略**：优先保证"可用与可控"。Cross-Encoder 不可用、超时或失败时，**必须回退至 `candidate_chunks` 原序**，确保 `diagnose` ⑩ 可正常执行。
 
 ---
-**父块扩展（Parent Chunk Expansion — diagnose ⑩ 内置，非独立检索步骤）**
+**父块扩展(Parent Chunk Expansion — diagnose ⑩ 内置,非独立检索步骤)**
 
-Cross-Encoder 精排截断出 Top-K 小块后，在构建 LLM prompt 前执行父块扩展（Small-to-Big 模式，见 3.1.2）：
-- 按各小块的 `parent_chunk_id` 批量回查 PostgreSQL，取父块全文（`chunk_raw_text`）
-- 若 `parent_chunk_id IS NULL`，保留小块原文兜底
-- 父块全文**仅用于当次 LLM prompt 构建**，不写回 `candidate_chunks` State 字段
-- `candidate_chunks` 全程存储小块，其余节点（`select_discriminative_symptom ⑤`、`extract_symptoms ④`）对父子索引完全无感知
+Cross-Encoder 精排截断出 Top-K 小块后,在构建 LLM prompt 前执行父块扩展(Small-to-Big 模式,见 §3.1.2):
+- 按各小块的 `parent_chunk_id` 批量回查 PostgreSQL,取父块全文(`chunk_raw_text`)
+- 若 `parent_chunk_id IS NULL`,保留小块原文兜底
+- 父块全文**仅用于当次 LLM prompt 构建**,不写回 `candidate_chunks` State 字段
+- `candidate_chunks` 全程存储小块,其余节点(`select_discriminative_symptom ⑤`、`extract_symptoms ④`)对父子索引完全无感知
+
+**父块大小**(2026-05-03 POC 验证):新切分方案下父块 median 1346 字 / p95 3563 字 / max 5218 字(~720~3700 token),约 56% 父块 > 1200 字会切多 child(其余 44% 父块 ≤ 1200 字,1 child = parent 整段)。父块全文塞入 LLM prompt 完全可控,**不需要做任何"展开整节为多 chunk"的额外扩展逻辑** — 直接用父块文本即可。
 

@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-**This is a spec-driven project in the skeleton stage.** Almost every file under `src/` is an empty placeholder (verify with `wc -l <file>` before assuming an import works). Real content currently lives in:
-- `DEV_SPEC.md` (4590 lines) — the **single source of truth** for architecture, schemas, and acceptance criteria.
-- `config/milvus_schema.py`, `src/rag/retrieval/reranker.py` — the only non-empty modules.
+**This is a spec-driven project in the skeleton stage.** Most files under `src/` are still empty placeholders (verify with `wc -l <file>` before assuming an import works). Real content lives in:
+- `DEV_SPEC.md` (~4600 lines) — the **single source of truth** for architecture, schemas, and acceptance criteria.
+- Modules already implemented are tracked in DEV_SPEC §8.4 progress table — tasks marked `[x]` correspond to non-empty production modules; `[~]` tasks may have partial code. **Never enumerate "implemented modules" here**; check §8.4.
 - `.claude/skills/auto-coder/` — the workflow that turns DEV_SPEC into code.
 
 Implementation proceeds task-by-task through the `auto-coder` skill (triggered by "auto code" / "自动开发"). It reads the §8.4 progress table in `DEV_SPEC.md`, picks the next `[ ]` task, implements per spec, runs tests, and commits.
@@ -17,6 +17,32 @@ Implementation proceeds task-by-task through the `auto-coder` skill (triggered b
 2. Inside DEV_SPEC: **§9 (global contracts) > business chapters (§3/§4/§6) > §8 (schedule)**. The schedule is an execution guide, not a design decision.
 3. Inside §9: the canonical lists win — §9.3 (full LLM-call inventory), §9.5 (full Pydantic schemas), §9.7 (`agent_limits` constants). A call site / field / constant not listed here is a violation, not an oversight.
 4. When DEV_SPEC and existing code disagree, **stop and ask the user** — do not silently pick a side.
+
+## Spec citation discipline (also for interactive coding, not just auto-coder)
+
+When implementing or modifying any non-trivial behavior:
+
+1. **Locate the spec section first.** Before writing code that touches an Agent node, RAG stage, schema, or runtime constant, find the authoritative spec section (use `grep -n "^### " DEV_SPEC.md` to navigate). If no spec section exists, surface this gap to the user *before* writing code.
+
+2. **Cite the section in code.** File-level docstrings, key function docstrings, and non-trivial test names should reference the spec section they implement (e.g. "DEV_SPEC §9.7" / `test_..._match_spec_9_7_1`). This survives PR rebase and lets future readers map code → spec without grep.
+
+3. **Surface gaps and conflicts proactively.** If you notice a spec/code mismatch (even one tangential to the current task), raise it as a sidebar in the same response — do not silently fix or silently ignore.
+
+4. **No silent re-derivation.** If a constant, schema field, or LLM call appears in §9.3/§9.5/§9.7's canonical lists, link to that list in the citing comment instead of re-stating the value — single source.
+
+## Sweep §9 before implementing
+
+§9 is the **global contracts** chapter. Authority hierarchy already declares §9 wins over business chapters, but in practice it's easy to read §3/§4/§6 (the chapter that "feels relevant") and forget §9 even exists. Before writing code, sweep the §9 subsections that match what you're about to touch:
+
+| Implementation | Sweep these §9 subsections first |
+|---|---|
+| Agent node with any LLM call | §9.1 (call template) + §9.3 (call inventory — your call site must be listed) + §9.5 (output schema) |
+| Field added/changed in `MedicalState` / `rag_trace.retrieved_chunks` / `chunks` | §9.2 (evolution rules — defaults required, no narrowing types) |
+| Runtime threshold / hard cap | §9.7 (`agent_limits` — never hardcode `MAX_X = 8` in node modules) |
+| Audit log write site | §9.6 (15-field `rag_trace` contract) |
+| Adding a new LLM call site | §9.3 inventory must add a row first; **a call site missing from §9.3 is a violation, not an oversight** |
+
+If a §9 rule contradicts what §3/§4/§6 implies, **§9 wins** (Authority hierarchy rule 2). Surface the conflict to the user (Spec citation discipline rule 3) — don't silently pick a side.
 
 ## Common commands
 
@@ -34,8 +60,9 @@ source .venv/bin/activate
 | Run a single test | `pytest tests/unit/test_xxx.py::test_yyy -v` |
 | Run only unit tests (no Docker needed) | `pytest tests/unit/` |
 | Initialize databases (skeleton scripts, see §A/B tasks) | `python scripts/init_db.py`, `python scripts/init_milvus.py` |
-| Document ingestion entry | `python scripts/ingest.py <pdf_path>` |
-| Seed term vector DB | `python scripts/seed_terms.py` |
+| Document ingestion entry (skeleton, see C7/C8) | `python scripts/ingest.py <pdf_path>` |
+| Seed terms vector DB (D2) | `python -m terms.build_icd10 --icd-xlsx /data/medical-resources/ICD10/<file>.xlsx` |
+| Batch parse all PDFs with MinerU hybrid | `bash scripts/batch_parse_pdfs.sh` |
 
 Dependencies are managed via `pyproject.toml` with `uv` (Python 3.12, `<3.13`). PyTorch must be `>=2.7` for the RTX 5070 Ti (Blackwell) target — the project pins the `cu126` index in `[tool.uv].extra-index-url`.
 
@@ -129,6 +156,8 @@ Each call site must:
 | `tests/unit/` | yes | yes | every change |
 | `tests/integration/` | yes | no (real Docker stack) | per-module gate |
 | `tests/e2e/` | **no** (real DashScope) | no | phase J only — costs real money/tokens |
+
+**All test files live under `tests/{unit,integration,e2e}/` as `test_*.py`** — including smoke / exploratory / no-assertion checks where the value is "see if this runs without crashing." Never under `scripts/`, which is for operational tools (`batch_parse_pdfs.sh`, `init_db.py`, etc.) — not verification. If a test needs heavy resources (GPU model load, real API calls), gate it with `pytestmark = pytest.mark.skipif(...)` instead of moving it out of `tests/`.
 
 `pytest-asyncio` is included; async tests need the appropriate marker. Integration tests require `docker compose up -d` first.
 

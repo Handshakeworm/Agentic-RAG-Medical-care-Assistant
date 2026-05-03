@@ -20,6 +20,25 @@ dependencies = [
     "accelerate>=1.0",
     "bitsandbytes>=0.45",                  # 8bit 量化(16GB 卡跑 8B Embedding 必需)
 
+    # Web/API 层(阶段 G)
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+
+    # Agent / LLM(阶段 C/F)
+    "langchain>=0.3",
+    "langchain-core>=0.3",
+    "langchain-openai>=0.2",               # DashScope OpenAI-兼容接口
+    "langgraph>=0.2",
+    "langgraph-checkpoint-postgres>=2.0",  # interrupt() 恢复用 PG 持久化 state
+    "tiktoken>=0.7",                       # 本地估算 prompt token,做上下文限流
+
+    # 监控(§5.2 / §9.1)
+    "prometheus-client>=0.20",
+    "prometheus-fastapi-instrumentator>=7.0",
+
+    # Auth(阶段 G2)
+    "pyjwt>=2.8",
+
     # 工具
     "python-dotenv>=1.0",
     "pydantic>=2.0",
@@ -31,6 +50,17 @@ dependencies = [
     # 测试
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
+    "pytest-mock>=3.12",
+]
+
+[project.optional-dependencies]
+# 文档灌库依赖,只在跑 ingestion ETL 时安装。
+# 必须用 mineru[pipeline] 而非 mineru,否则 hybrid-auto-engine / hybrid-vllm-async-engine
+# 启动会抛 HybridDependencyError(缺 albumentations / omegaconf / pyclipper 等 10 个小包)。
+# pipeline extras 不动 torch / langchain,无冲突。
+ingestion = [
+    "mineru[pipeline]>=2.5,<4",
 ]
 
 [tool.uv]

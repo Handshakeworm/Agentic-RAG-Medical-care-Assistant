@@ -6,7 +6,7 @@
 
 1. **只按本文档设计落地**：以 1.3.1 节目录树为"交付清单"，每一步都要在文件系统上产生可见变化。
 2. **先打通主闭环，再逐层增强**：优先做"可跑通的端到端路径（Ingestion → Retrieval → Agent 最小诊断链路 ①→①.5→②→③→④→⑤→⑩→⑪→⑫→⑬）"，再接入追问循环（⑥⑦）和检查循环（⑧⑨）。
-3. **外部依赖可替换/可 Mock**：LLM（Qwen）/ Embedding（Qwen3-Embedding-8B）/ Reranker / Milvus / PostgreSQL / MongoDB 的真实调用在单元测试中一律用 Fake/Mock，集成测试再开真实后端。
+3. **外部依赖可替换/可 Mock**：LLM（Qwen）/ Embedding（Qwen3-Embedding-8B）/ Reranker / Milvus / PostgreSQL 的真实调用在单元测试中一律用 Fake/Mock，集成测试再开真实后端。
 4. **每个小阶段给出验收标准**：明确"完成"的定义，避免模糊交付。
 5. **基础设施按需引入**：Docker Compose 在阶段 A 搭建基座，监控/缓存等在主链路跑通后再逐步接入。
 
@@ -15,8 +15,8 @@
 | 阶段 | 名称 | 目的 |
 |------|------|------|
 | **A** | 工程骨架与基础设施基座 | 建立可运行、可配置、可测试的工程骨架；Docker Compose 拉起全部存储依赖 |
-| **B** | 数据层与模型客户端 | 打通 PostgreSQL / Milvus / MongoDB 连接；封装 Qwen3-Embedding-8B、Reranker、Qwen LLM 推理客户端 |
-| **C** | Ingestion Pipeline（MinerU → Chunk → Embedding → 存储） | 离线摄取链路跑通，样例文档写入 Milvus + PostgreSQL + MongoDB，支持幂等与增量 |
+| **B** | 数据层与模型客户端 | 打通 PostgreSQL / Milvus 连接；封装 Qwen3-Embedding-8B、Reranker、Qwen LLM 推理客户端 |
+| **C** | Ingestion Pipeline（MinerU → Chunk → Embedding → 存储） | 离线摄取链路跑通，样例文档写入 Milvus + PostgreSQL（含 raw_documents 表存 MinerU 产物），支持幂等与增量 |
 | **D** | 术语库与 Entity Linking | 构建 terms_collection，实现口语→标准术语映射，为 Retrieval 术语扩展和 Agent 症状预处理提供基础 |
 | **E** | Retrieval（Dense + Sparse + RRF + Rerank） | 在线查询链路跑通，得到 Top-K chunks（含引用信息），具备稳定回退策略 |
 | **F** | Agent 工作流（LangGraph StateGraph） | 按 4.1 节设计落地 16 节点 + 2 条件路由，实现基于信息增益收敛的迭代式诊断工作流 |
@@ -31,13 +31,13 @@
 
 ### 阶段 A：工程骨架与基础设施基座
 
-**目的**：建立可运行、可配置、可测试的工程骨架；Docker Compose 拉起全部存储依赖（PostgreSQL、Milvus、MongoDB、Redis），后续所有模块都能以 TDD 方式落地。
+**目的**：建立可运行、可配置、可测试的工程骨架；Docker Compose 拉起全部存储依赖（PostgreSQL、Milvus、Redis），后续所有模块都能以 TDD 方式落地。
 
 | 编号 | 任务 | 产出文件 | 验收标准 |
 |------|------|---------|---------|
 | A1 | 初始化目录树与最小可运行入口 | 1.3.1 节完整目录结构、`pyproject.toml`、`src/__init__.py` 等 | `python -m src` 不报错；目录结构与 1.3.1 节一致 |
-| A2 | Docker Compose 搭建存储基座 | `docker-compose.yml`、`infra/docker/` | `docker compose up -d` 可拉起 PostgreSQL + Milvus + MongoDB + Redis，各服务健康检查通过 |
-| A3 | 配置加载与校验 | `config/settings.py`、`config/model_config.py`、`.env.example` | 从 `.env` 加载配置，缺失必填项时抛明确错误；**必须包含 §9.7 定义的 `AgentLimitsSettings` 段**（7 个常量：`MAX_FOLLOWUP_ROUNDS` / `MAX_EXAM_ROUNDS` / `MAX_FOLLOWUP_QUESTIONS` / `RETRIEVE_TOP_N` / `ASKABLE_GAIN_THRESHOLD` / `ENTITY_LINKING_TIER2_THRESHOLD` / `RERANKER_CUTOFF_LAYERS`），以 `settings.agent_limits` 嵌套属性暴露；单元测试：默认值与 §9.7 初始值一致；`.env` 覆盖 `AGENT_MAX_FOLLOWUP_ROUNDS=10` 能生效；缺失 LLM API_KEY 等必填项报错 |
+| A2 | Docker Compose 搭建存储基座 | `docker-compose.yml`、`infra/docker/` | `docker compose up -d` 可拉起 PostgreSQL + Milvus + Redis，各服务健康检查通过 |
+| A3 | 配置加载与校验 | `config/settings.py`、`.env.example` | 从 `.env` 加载配置，缺失必填项时抛明确错误；**必须包含 §9.7 定义的 `AgentLimitsSettings` 段**（7 个常量：`MAX_FOLLOWUP_ROUNDS` / `MAX_EXAM_ROUNDS` / `MAX_FOLLOWUP_QUESTIONS` / `RETRIEVE_TOP_N` / `ASKABLE_GAIN_THRESHOLD` / `ENTITY_LINKING_TIER2_THRESHOLD` / `RERANKER_CUTOFF_LAYERS`），以 `settings.agent_limits` 嵌套属性暴露；单元测试：默认值与 §9.7 初始值一致；`.env` 覆盖 `AGENT_MAX_FOLLOWUP_ROUNDS=10` 能生效；缺失 LLM API_KEY 等必填项报错 |
 | A4 | pytest 测试基座 | `tests/`、`pyproject.toml [tool.pytest]` | `pytest` 可运行，冒烟测试通过 |
 | A5 | 公共工具模块 | `src/common/normalize.py`、`hashing.py`、`metrics.py` | normalize + SHA256 哈希函数单元测试通过；与 3.1.4.2 定义一致 |
 | A6 | Prompt 模板骨架 | `src/prompts/ingestion.py`、`agent.py`、`evaluation.py` | 三个模块均可 `from src.prompts.xxx import yyy` 导入；函数签名与第 7 节设计一致；具体 prompt 内容随对应业务阶段（C/F/I）落地时填充。查询处理 prompt 统一归入 `agent.py` 的 `build_query_construction_prompt`，不再单列 `retrieval.py` |
@@ -46,15 +46,15 @@
 
 ### 阶段 B：数据层与模型客户端
 
-**目的**：打通三层存储连接（PostgreSQL / Milvus / MongoDB），封装三个模型推理客户端（Qwen3-Embedding-8B / Reranker / Qwen LLM），使上层业务代码可通过统一接口调用。Redis 缓存客户端延至阶段 H 与缓存业务对接一并落地。
+**目的**：打通两层存储连接（PostgreSQL / Milvus），封装三个模型推理客户端（Qwen3-Embedding-8B / Reranker / Qwen LLM），使上层业务代码可通过统一接口调用。Redis 缓存客户端延至阶段 H 与缓存业务对接一并落地。
 
 | 编号 | 任务 | 产出文件 | 验收标准 |
 |------|------|---------|---------|
-| B1 | PostgreSQL 连接池 + ORM 模型 | `src/db/postgres/connection.py`、`models.py` | 连接池可用；sources / chunks / users / patients / conversations 等表 ORM 模型与 2.4 定义一致 |
+| B1 | PostgreSQL 连接池 + ORM 模型 | `src/db/postgres/connection.py`、`models.py` | 连接池可用；sources / raw_documents / chunks / users / patients / conversations 等表 ORM 模型与 2.4 定义一致 |
 | B2 | PostgreSQL 迁移脚本 | `src/db/postgres/migrations/` | Alembic `upgrade head` 可创建全部表结构与索引（与 2.4.2、2.4.3、2.4.5 一致） |
 | B3 | Milvus 连接管理 + docs_collection | `src/db/milvus/connection.py`、`docs_collection.py`、`config/milvus_schema.py` | Collection Schema 与 2.4.1 定义一致；upsert + search 集成测试通过 |
 | B4 | Milvus terms_collection | `src/db/milvus/terms_collection.py` | Schema 与 2.4.6 一致；upsert + 向量检索集成测试通过 |
-| B5 | MongoDB 连接管理 + raw_documents | `src/db/mongo/connection.py`、`raw_documents.py` | raw_documents Collection 操作与 2.4.4 一致；upsert 集成测试通过 |
+| B5 | PostgreSQL raw_documents 表（MinerU 产物存储） | `src/db/postgres/models.py`（raw_documents ORM 类）、`src/db/postgres/migrations/0001_raw_documents.sql` | raw_documents 表结构与 2.4.4 一致（jsonb + text + GIN 索引）；上游与 sources 表 1:1 外键约束生效；upsert 集成测试通过 |
 | B6 | Qwen3-Embedding-8B 客户端 | `src/models/embedding_model.py` | GPU 推理（INT8）；单条/批量编码接口；输出 4096 维 Dense 向量（Sparse 由 Milvus BM25 承担）；单元测试（Mock）+ 集成测试 |
 | B7 | BGE-Reranker-v2-minicpm-layerwise 客户端 | `src/models/reranker_model.py` | GPU 推理（与 Embedding 共享显卡）；layerwise 推理与 cutoff_layers 配置；输入 [query, doc] 对，输出相关性分数；超时回退机制；单元测试 |
 | B8 | LLM 推理客户端（DashScope） | `src/models/llm_client.py` | 对接 DashScope OpenAI-compatible API；支持流式/非流式输出；单元测试（Mock） |
@@ -63,12 +63,12 @@
 
 ### 阶段 C：Ingestion Pipeline（MinerU → Chunk → Embedding → 存储）
 
-**目的**：离线摄取链路跑通，能把样例 PDF 文档经 MinerU 解析 → 切分 → 增强 → 向量化 → 写入 Milvus + PostgreSQL + MongoDB，支持幂等写入与增量更新。
+**目的**：离线摄取链路跑通，能把样例 PDF 文档经 MinerU 解析 → 切分 → 增强 → 向量化 → 写入 Milvus + PostgreSQL（含 raw_documents 表存 MinerU 原始产物），支持幂等写入与增量更新。
 
 | 编号 | 任务 | 产出文件 | 验收标准 |
 |------|------|---------|---------|
-| C1 | MinerU 产物加载器 | `src/rag/ingestion/mineru_loader.py` | 读取 `mineru_output/` 下的 `.md` + `content_list.json`；写入 MongoDB `raw_documents`；单元测试 |
-| C2 | Chunking（父子分块 + 表格双粒度） | `src/rag/ingestion/chunking.py` | **非表格内容**：先按 heading 边界切出父块（写入 chunks 表，`embedding_status='skip'`，不向量化），再对父块内容执行 `RecursiveCharacterTextSplitter` 切子块并记录 `parent_chunk_id`；输出携带 heading_path、relative_chunk_index。**表格内容**（识别 MinerU `content_list` 中的 table 类型块）：产出两类 chunk——① 整表摘要 chunk（一条概括性描述，回答"这张表讲什么"）② 逐行 chunk（每行转自然语言句子 + 元数据 `{table, row}`）；表格 chunk 的 `parent_chunk_id` 指向所在 heading 节的父块，便于父块扩展时拿到上下文；单元测试覆盖：父块生成、parent_chunk_id 关联、顶层无标题兜底、表格整表摘要、表格行拆分。**非表格图像类**（思维导图/坐标图/照片/影像）：只留图名/bbox 到 MongoDB `content_list`，不进入 chunks 表（见 3.1.1 末设计原则） |
+| C1 | MinerU 产物加载器 | `src/rag/ingestion/mineru_loader.py` | 读取 `mineru_output/{name}/{backend}_auto/` 下的 `.md` + `content_list_v2.json`(v2 页级嵌套,见 2.4.4)；写入 PostgreSQL `raw_documents` 表；单元测试 |
+| C2 | Chunking(父子分块 + 表格双粒度) | `src/rag/ingestion/chunking.py` + 单本书 anchor 配置 | **非表格内容**:按 §3.1.2 4 步流程切分 — Step 1 目录权威清单提取、Step 2 正文节边界匹配 + REAL_START 选取、Step 3 全书层面截断 + 节内参考文献丢弃、Step 4 父块构建(节本身或节内三遍切【】+(一)+1.,严格层级合并)、Step 5 子块构建(size 驱动,目标 600 字,父块 ≤ 1200 字直接当 child)。父块 `embedding_status='skip'` 不向量化,子块多向量化。**表格内容**(识别 MinerU `content_list` 中的 table 类型块):产出两类 chunk —— ① 整表摘要 chunk(LLM 一句概括) ② 逐行 chunk(parse HTML 转自然语言);共享 `parent_chunk_id` 指向所在节父块。**非表格图像类**:只留图名/bbox 到 `raw_documents.content_list`,不进 chunks 表(见 §3.1.1 末)。**单元测试**:目录字典提取 / REAL_START 选取规则 / 三遍切阈值 / 严格层级合并 / 子块 size 累积算法(含 force-add 边界) / 父子覆盖完整性 mismatch=0。**12 本书验证**:每本按 §3.1.2 切分主流程跑 + 抽样人审 + 验 mismatch=0 |
 | C3 | 幂等性工具 | `src/rag/ingestion/idempotency.py` | source_id / heading_path_id / chunk_id / content_hash 生成逻辑与 3.1.4 一致；父块 chunk_id 固定使用 `relative_chunk_index="parent"` 参与哈希（见 3.1.4.2）；单元测试覆盖 normalize + 多级哈希 + 父块 ID 与子块 ID 不冲突验证 |
 | C4 | LLM 语义增强 | `src/rag/ingestion/enrichment.py`、`src/agent/schemas/ingestion.py`（`ChunkEnrichmentOutput`，定义与 §9.5 一致） | 单次 LLM 调用生成 title / summary / tags / hypothetical_questions；Prompt 来自 `src/prompts/ingestion.py`；单元测试（Mock LLM） |
 | C5 | 多向量 Embedding | `src/rag/ingestion/embedding.py` | 对每个 Chunk 生成 1 original + 1 summary + 2~3 question 向量记录；全部仅含 Dense 向量（Sparse 检索由 Milvus BM25 基于 original_content 文本字段实现）；批处理；content_hash 增量判断；单元测试 |
@@ -80,12 +80,12 @@
 
 ### 阶段 D：术语库与 Entity Linking
 
-**目的**：构建 `terms_collection`（2.4.6），导入 CHIP/CBLUE + ICD-10-CN + CMeSH 三层术语数据，实现口语→标准术语的向量检索映射，为阶段 E 查询预处理的术语扩展和阶段 F Agent 节点 ② build_query 的 Entity Linking 提供基础。
+**目的**：构建 `terms_collection`（2.4.6），导入 ICD-10-CN + CMeSH 标准术语数据，Layer 1 PROJECT 层别名先以医师整理 + 上线后回流方式补充，实现口语→标准术语的向量检索映射，为阶段 E 查询预处理的术语扩展和阶段 F Agent 节点 ② build_query 的 Entity Linking 提供基础。
 
 | 编号 | 任务 | 产出文件 | 验收标准 |
 |------|------|---------|---------|
-| D1 | 术语数据整理与清洗 | `terms/chip_cblue/`、`terms/icd10_cn/`、`terms/cmesh/` | 三层数据源格式统一为 `{concept_id, preferred_term, alias, source_vocab, icd10, category}` |
-| D2 | 术语库构建脚本 | `terms/build_terms.py`、`scripts/seed_terms.py` | 对 alias 文本做 Qwen3-Embedding-8B Dense 编码 → upsert 到 terms_collection；幂等；集成测试 |
+| D1 | 术语数据整理与清洗 | `terms/icd10_cn/`、`terms/cmesh/` | 数据源格式统一为 `{concept_id, preferred_term, alias, source_vocab, icd10, category}` |
+| D2 | 术语库构建脚本 | `terms/build_icd10.py` | 对 alias 文本做 Qwen3-Embedding-8B Dense 编码 → upsert 到 terms_collection；幂等；集成测试 |
 | D3 | 术语检索接口 | `src/db/milvus/terms_collection.py` 扩展 | 输入口语文本，返回 Top-5 候选术语（含 concept_id / preferred_term / icd10）；按 category 可过滤；集成测试 |
 
 ---
@@ -111,7 +111,7 @@
 
 | 编号 | 任务 | 产出文件 | 验收标准 |
 |------|------|---------|---------|
-| F1 | MedicalState 定义 + 初始化工厂 | `src/agent/state.py` | TypedDict 包含 messages / patient_id / patient_input / chief_complaint / present_illness / present_illness_slots / medical_history / exam_reports / report_findings / standardized_entities / dense_query / sparse_queries / candidate_chunks / extracted_symptoms / confirmed_symptoms / denied_symptoms / uncertain_symptoms / followup_round / last_nlu_round / followup_question / followup_answer / followup_questions / unaskable_symptoms / info_gain / exam_round / pending_exam_results / diagnosis_result / safety_constraints / recommended_tests / medication_advice / risk_warnings / final_response / last_reranked_chunks / session_token_usage / session_latency_ms / last_diagnose_prompt / last_diagnose_raw_output 全部字段（无 `followup_capped` 旗标，追问上限兜底由 Node ⑩ 直读 `followup_round` 判断）；`present_illness_slots` 包含 13 个维度槽位（onset_time/onset_mode/trigger/location/nature/severity/duration_pattern/aggravating/relieving/associated_symptoms/progression/treatment_tried/treatment_response），初始值为 None/空列表；实现 `create_initial_state(patient_id, patient_input) -> MedicalState` 工厂函数（初始值与 4.1.1a 节一致）；与 4.1 节定义一致；单元测试 |
+| F1 | MedicalState 定义 + 初始化工厂 | `src/agent/state.py` | Pydantic `BaseModel`(见 §4.1.1 实现形态注)包含 messages / patient_id / patient_input / chief_complaint / present_illness / present_illness_slots / medical_history / exam_reports / report_findings / standardized_entities / dense_query / sparse_queries / candidate_chunks / extracted_symptoms / confirmed_symptoms / denied_symptoms / uncertain_symptoms / followup_round / last_nlu_round / followup_question / followup_answer / followup_questions / unaskable_symptoms / info_gain / exam_round / pending_exam_results / diagnosis_result / safety_constraints / recommended_tests / medication_advice / risk_warnings / final_response / last_reranked_chunks / session_token_usage / session_latency_ms / last_diagnose_prompt / last_diagnose_raw_output 全部字段（无 `followup_capped` 旗标，追问上限兜底由 Node ⑩ 直读 `followup_round` 判断）；`present_illness_slots` 包含 13 个维度槽位（onset_time/onset_mode/trigger/location/nature/severity/duration_pattern/aggravating/relieving/associated_symptoms/progression/treatment_tried/treatment_response），初始值为 None/空列表；实现 `create_initial_state(patient_id, patient_input) -> MedicalState` 工厂函数（初始值与 4.1.1a 节一致）；与 4.1 节定义一致；单元测试 |
 | F2 | 节点 ①：info_collect | `src/agent/nodes/info_collect.py`、`src/agent/schemas/info_collect.py`（`InfoCollectOutput`，定义与 §9.5 一致） | Step 1: LLM 从 patient_input 提取 chief_complaint + present_illness + present_illness_slots（13 个维度槽位同步结构化填充，未提及维度保持 None/空）；Step 2: 以 patient_id 查 PostgreSQL 加载 medical_history；Step 3: 加载 exam_reports；Prompt 来自 `src/prompts/agent.py`；单元测试（Mock LLM + Mock DB）；验证：完整输入无空槽、简短输入多空槽 |
 | F2.5 | 节点 ①.5：analyze_initial_reports | `src/agent/nodes/analyze_initial_reports.py`、`src/agent/utils/report_parser.py`、`src/agent/schemas/report_parser.py`（`ReportFinding` / `ReportFindings`，定义与 §9.5 一致） | exam_reports 非空时执行；多模态 LLM 直读报告（图片 jpg/png / PDF 直传）→ 提取 report_type / report_date / abnormal_values / impressions / positive_findings / negative_findings；输出 report_findings；exam_reports 为空时透传；报告本身已是标准术语，无需 Entity Linking；Prompt 来自 `src/prompts/agent.py`；单元测试（Mock 多模态 LLM） |
 | F3 | 节点 ②：build_query | `src/agent/nodes/build_query.py`、`src/agent/schemas/ner.py`（`NEREntity` / `NERResult`）、`src/agent/schemas/entity_linking.py`（`EntityLinkingMatch` / `EntityLinkingResult`）、`src/agent/schemas/query_construction.py`（`QueryConstructionOutput`），三个 Schema 定义均与 §9.5 一致 | 四步流程：Step 1 LLM NER 实体抽取（首轮对 `chief_complaint` + `present_illness`；后续轮仅对本轮新增 `followup_answer`）→ Step 2 Entity Linking（查 terms_collection Top-5 → LLM 选择 Top-1，新实体按 `preferred_term` 去重追加到 `standardized_entities`）→ Step 3 术语扩展（concept_id 查全部别名 → OR 表达式）→ Step 4 Query 构建/改写（Dense query 整合 preferred_term + `present_illness_slots` 已填维度 + `report_findings` 的 positive_findings/impressions；Sparse 用术语扩展 OR 表达式；`abnormal_values` 原始数值、`negative_findings`、`denied_symptoms` 均不进 query）；单元测试（Mock LLM + Mock terms_collection） |
@@ -180,11 +180,11 @@
 
 ### 阶段 J：端到端验收与文档收口
 
-**目的**：在真实环境（非 Mock）下跑通全链路 E2E 冒烟测试——与前面各阶段使用 Mock 存储 / Mock LLM 的集成测试不同，本阶段使用真实运行的 PostgreSQL、Milvus、MongoDB、LLM 推理后端，验证数据真正在各层之间流转。完善 README，确保"开箱即用 + 可复现"。
+**目的**：在真实环境（非 Mock）下跑通全链路 E2E 冒烟测试——与前面各阶段使用 Mock 存储 / Mock LLM 的集成测试不同，本阶段使用真实运行的 PostgreSQL、Milvus、LLM 推理后端，验证数据真正在各层之间流转。完善 README，确保"开箱即用 + 可复现"。
 
 | 编号 | 任务 | 产出文件 | 验收标准 |
 |------|------|---------|---------|
-| J1 | E2E：Ingestion 全链路 | `tests/e2e/test_ingestion_e2e.py`（与 C7 的 `tests/integration/test_ingestion_pipeline.py` 区分：C7 是 Mock 依赖的集成测试，J1 是真实 Milvus/PG/Mongo 的端到端冒烟） | 样例 PDF → MinerU 产物 → 完整摄取 → Milvus + PostgreSQL + MongoDB 数据验证 |
+| J1 | E2E：Ingestion 全链路 | `tests/e2e/test_ingestion_e2e.py`（与 C7 的 `tests/integration/test_ingestion_pipeline.py` 区分：C7 是 Mock 依赖的集成测试，J1 是真实 Milvus/PG 的端到端冒烟） | 样例 PDF → MinerU 产物 → 完整摄取 → Milvus + PostgreSQL（含 raw_documents 表）数据验证 |
 | J2 | E2E：Retrieval 全链路 | `tests/e2e/test_retrieval_e2e.py`（走真实 Milvus + 真实 Embedding/Reranker） | 真实 query → 双路召回 → RRF → Rerank → Top-K 结果校验 |
 | J3 | E2E：Agent 全链路 | `tests/e2e/test_agent_workflow_e2e.py`（**与 F15 的 `tests/integration/test_agent_workflow.py` 区分**：F15 走 Mock LLM + Mock DB 的集成测试，J3 走真实 DashScope + 真实 Milvus/PG 的端到端冒烟） | 模拟患者输入 → 完整工作流 → 诊断输出（覆盖正常/高危/追问/低置信度路径） |
 | J4 | E2E：API 接口 | `tests/e2e/test_api_e2e.py`（真实 FastAPI + 真实后端） | 注册 → 登录 → 问诊 → 追问 → 获取结果 完整交互链路 |
@@ -203,10 +203,10 @@
 
 | 编号 | 任务名称 | 状态 | 完成日期 | 备注 |
 |------|---------|------|---------|------|
-| A1 | 初始化目录树与最小可运行入口 | [ ] | | |
-| A2 | Docker Compose 搭建存储基座 | [ ] | | |
-| A3 | 配置加载与校验 | [ ] | | |
-| A4 | pytest 测试基座 | [ ] | | |
+| A1 | 初始化目录树与最小可运行入口 | [x] | 2026-05-01 | §1.3.1 目录树修订(删过时 `data/` + 简化 `terms/`);`src/__init__.py` + `src/__main__.py` 就绪,`python -m src` 通过 |
+| A2 | Docker Compose 搭建存储基座 | [~] | | 已:compose 配齐(13 服务,Mongo 已删)、Milvus etcd/minio/standalone 三件套 healthy、端口绑 127.0.0.1 防外网;待:PG/Redis 实启验证 |
+| A3 | 配置加载与校验 | [x] | 2026-05-01 | `config/settings.py` 实现(§9.7 + `LLM_API_KEY` 必填),5 测试 PASS;spec 同步删除冗余的 `config/model_config.py` |
+| A4 | pytest 测试基座 | [~] | | 已:tests/ 双层(unit 5 + integration 5)、`test_settings.py` 4/4 PASS、`test_terms_retrieval_smoke.py` collect OK(等 mineru 跑完 GPU 释放再实跑)、CLAUDE.md 加测试位置规则;待:conftest 设计、`test_reranker_smoke` / `test_terms_retrieval_smoke` 真跑过 |
 | A5 | 公共工具模块 | [ ] | | |
 | A6 | Prompt 模板骨架 | [ ] | | |
 
@@ -214,22 +214,23 @@
 
 | 编号 | 任务名称 | 状态 | 完成日期 | 备注 |
 |------|---------|------|---------|------|
-| B1 | PostgreSQL 连接池 + ORM 模型 | [ ] | | |
-| B2 | PostgreSQL 迁移脚本 | [ ] | | |
-| B3 | Milvus 连接管理 + docs_collection | [ ] | | |
-| B4 | Milvus terms_collection | [ ] | | |
-| B5 | MongoDB 连接管理 + raw_documents | [ ] | | |
-| B6 | Qwen3-Embedding-8B 客户端 | [ ] | | |
-| B7 | BGE-Reranker-v2-minicpm-layerwise 客户端 | [ ] | | |
-| B8 | Qwen LLM 推理客户端 | [ ] | | |
+| B1 | PostgreSQL 连接池 + ORM 模型 | [~] | | 已:`connection.py`(engine + session_scope)+ `models.py` Source/RawDocument/Chunk + 配套 upsert/bulk_upsert 接口(7 unit + 5 integration PASS,含父子 FK + 部分索引验证 + TEXT[] roundtrip);待:users/patients/sessions/conversations/audit 等 G/F 阶段才用的表 ORM |
+| B2 | PostgreSQL 迁移脚本 | [~] | | 已:`0001_raw_documents.sql`(sources + raw_documents + GIN)、`0002_chunks.sql`(chunks + 5 索引,含两个 partial index);待:其他表迁移、Alembic 接入(2 个迁移阶段手动 psql 即可,Alembic 推迟到表数 ≥ 5 才接) |
+| B3 | Milvus 连接管理 + docs_collection | [x] | 2026-05-01 | `config/milvus_schema.py` 9 字段 schema(spec 8 + BM25 派生 sparse)+ HNSW dense / BM25 sparse(中文 analyzer)/ 3 scalar 索引;`src/db/milvus/docs_collection.py` ensure/upsert/search_dense/search_sparse_bm25/count/drop;9 unit + 5 integration PASS(中文 BM25 命中"胆囊炎"验证) |
+| B4 | Milvus terms_collection | [x] | 2026-04-30 | schema(8 字段)+ HNSW + INVERTED 索引 + ensure/upsert/search/count/drop 接口齐;`config/milvus_schema.py` + `src/db/milvus/terms_collection.py` |
+| B5 | PostgreSQL raw_documents 表（MinerU 产物存储） | [x] | 2026-05-02 | `connection.py`(engine + session_scope)+ `models.py`(Source/RawDocument ORM + `upsert_source`/`upsert_raw_document` 幂等接口,ON CONFLICT DO UPDATE);4 个 JSONB 字段全 NOT NULL(spec §2.4.4 修订版);11 测试 PASS(6 unit schema 锁 + 5 integration:upsert/幂等/级联删/GIN jsonpath 查 type/FK 违反) |
+| B6 | Qwen3-Embedding-8B 客户端 | [~] | | 已:8bit 加载链路验证(BitsAndBytesConfig + device_map='auto'),scripts 内已实战调用,显存 9.3GB;待:封装到 `src/models/embedding_model.py` |
+| B7 | BGE-Reranker-v2-minicpm-layerwise 客户端 | [~] | | 已:`src/rag/retrieval/reranker.py` 封装 LayerWiseFlagLLMReranker(lazy load + cutoff_layer=28)+ 冒烟测试 `tests/integration/test_reranker_smoke.py`;待:真跑过测试 |
+| B8 | Qwen LLM 推理客户端 | [x] | 2026-05-01 | `src/models/llm_client.py::get_llm()` 工厂(lru_cache,薄层不封装 retry/metrics 按 §9.1);7 测试 PASS(5 unit + 2 integration smoke 真调 DashScope qwen3.5-122b-a10b 通,流式 + 非流式) |
 
 ### 阶段 C：Ingestion Pipeline
 
 | 编号 | 任务名称 | 状态 | 完成日期 | 备注 |
 |------|---------|------|---------|------|
-| C1 | MinerU 产物加载器 | [ ] | | |
-| C2 | Chunking（父子分块 + 表格双粒度） | [ ] | | |
-| C3 | 幂等性工具 | [ ] | | |
+| C1 | MinerU 产物加载器 | [x] | 2026-05-02 | `src/rag/ingestion/mineru_loader.py::load_mineru_output()`(177 行)读 4 文件 + **双清洗 image VLM 幻觉**(v2 `block.content.content` 删除 + 用同段文本作指纹精确 substring 删 markdown,短指纹 < 20 字符跳过防误删,清洗后 grep 自检 unclean 报 warning)+ source_id 走 C3 + upsert sources/raw_documents + 返回 stats dict(预留 H2/§5.2.3 埋点接口);保留 image_caption / image_footnote / bbox / `![](images/...)` 占位符 / table.html / chart.content / page_header 等(过滤归 C2);11 unit + 3 integration PASS;`scripts/load_mineru.py` 批量入口(单本/--all);**13 本教材全部灌入 PG**(13912 页 / 264948 block / 删 7426 image content / 0 指纹遗漏 / 22.6s,raw_documents 表占 273MB);顺手删 0 行僵尸文件 `image_caption.py` |
+| C2 | Chunking(父子分块 + 表格双粒度) | [~] | | 已:**step1 title.level 重建**(已弃案,见 §3.1.1 限制 2 / §3.1.2,改用目录权威清单);**step2 block extractor**(`extract_chunkable_text` 已实现,15 unit PASS);**POC 验证完整切分主流程**(`scripts/poc_chunking_endocrinology_v4/poc_chunk_book.py`,《内分泌代谢病学第4版上册》 1204 父块 / 3012 子块 / mismatch=0,详见 [METHODOLOGY.md](scripts/poc_chunking_endocrinology_v4/METHODOLOGY.md));待:**step3 把 POC port 到 production** `chunking.py` 主流程(目录字典+正文匹配+三遍切+严格层级合并+size 驱动子块切+书末截断+参考文献丢弃) / step4 table+chart 双粒度 / step5 12 本书逐本 anchor pattern 适配 + 切块验证 |
+| C2.5 | 用药指南专用处理(待定) | [ ] | | **背景**:《中国医师药师临床用药指南》是药典/reference book(每药品名独立 title,30289 条),通用"篇/章/节"chunking 策略不适用(C2-step1 验证 fallback 99.9%)。**候选方案**:A 药品级 chunker(每药品 → 1 条完整 chunk 含【适应症】【用法】【禁忌】) / B 改 PG `drug_reference` 表 + terms_collection alias linking(更贴药典 reference 本质,绕开 Milvus 模糊检索的 overkill)。**当前**:raw_documents 已灌(source_id `189905989d350dd2`),C2 主流程通过 exclude 列表跳过它,C5/C6 同样跳过,本 RAG 主线不阻塞。**决策时机**:C2 主流程 + 12 本 chunking 跑通后,根据实际检索召回率与产品场景独立 PR |
+| C3 | 幂等性工具 | [x] | 2026-05-02 | `src/rag/ingestion/idempotency.py` 6 个纯函数(normalize / source_id / heading_path_id / chunk_id / parent_chunk_id / content_hash);全部按 §3.1.4 规则,无 IO 无状态;30 unit PASS(覆盖 normalize 6 个、source_id 5、heading_path 5、chunk_id 3、parent 3、content_hash 4 + 综合 4) |
 | C4 | LLM 语义增强 | [ ] | | |
 | C5 | 多向量 Embedding | [ ] | | |
 | C6 | 三层存储写入 + 僵尸清理 | [ ] | | |
@@ -240,9 +241,9 @@
 
 | 编号 | 任务名称 | 状态 | 完成日期 | 备注 |
 |------|---------|------|---------|------|
-| D1 | 术语数据整理与清洗 | [ ] | | |
-| D2 | 术语库构建脚本 | [ ] | | |
-| D3 | 术语检索接口 | [ ] | | |
+| D1 | 术语数据整理与清洗 | [~] | | 已:ICD-10 北京临床版 v601 下载就位(/data/medical-resources/ICD10/,40k 行)+ build_icd10.py 内嵌清洗(去重、空值过滤、类型推导);待:CMeSH 等其他来源(YAGNI 暂不做) |
+| D2 | 术语库构建脚本 | [x] | 2026-04-30 | `terms/build_icd10.py` 灌入 40474 条 ICD-10 北京临床版;主键 `{icd_code}_{SHA256(alias)[:16]}` + Milvus upsert 保证幂等;categorize:R 段→symptom,其他→disease |
+| D3 | 术语检索接口 | [x] | 2026-04-30 | `search_aliases` 候选池放大 + 按 `preferred_term` 去重(score 同则取 concept_id 更短/字母序更小);确定性 tie-break 保证幂等;冒烟测试 11 条 query Top-1 命中率 95%、Top-K 信息密度 5/5 |
 
 ### 阶段 E：Retrieval
 
@@ -259,7 +260,7 @@
 
 | 编号 | 任务名称 | 状态 | 完成日期 | 备注 |
 |------|---------|------|---------|------|
-| F1 | MedicalState 定义 + 初始化工厂 | [ ] | | |
+| F1 | MedicalState 定义 + 初始化工厂 | [x] | 2026-05-01 | `src/agent/state.py` 实现(§4.1.1 37 字段 **Pydantic BaseModel** + 嵌套 `PresentIllnessSlots` / `SessionTokenUsage` / `SessionLatencyMs` + `create_initial_state`),8 测试 PASS(字段清单 + 类型校验 + 老数据反序列化默认值 + 多 session 不共享 + §9.2 演化规则) |
 | F2 | 节点 ①：info_collect | [ ] | | |
 | F2.5 | 节点 ①.5：analyze_initial_reports | [ ] | | |
 | F3 | 节点 ②：build_query | [ ] | | |

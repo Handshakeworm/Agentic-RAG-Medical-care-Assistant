@@ -12,8 +12,12 @@
 
 #### 4.1.1 State 定义
 
+> **实现形态**:`MedicalState` 实际是 **Pydantic `BaseModel`**(`pydantic.BaseModel`),不是 TypedDict。原因:§9.2 兼容性规则全是 Pydantic Field 语法(checkpointer 反序列化老 state 时缺字段自动填默认值,避免 KeyError);§9.5 inner schema 也是 Pydantic;嵌套结构(token_usage / latency / present_illness_slots)用嵌套 BaseModel 强类型化,把"注释式 schema"升级为 runtime 强制约束。
+>
+> 下方代码块的 `TypedDict` 写法仅作**字段清单与初始值的快速参考**;实际类声明、Field 默认值、嵌套 BaseModel(`PresentIllnessSlots` / `SessionTokenUsage` / `SessionLatencyMs`)见 `src/agent/state.py`。
+
 ```python
-class MedicalState(TypedDict):
+class MedicalState(TypedDict):  # 实际为 pydantic.BaseModel,见 src/agent/state.py
     # === 消息历史 ===
     messages: Annotated[list[BaseMessage], add_messages]  # 完整消息历史（各节点追加，LangGraph 自动合并）；⚠️ 仅用于 Checkpointer 持久化与审计追溯，任何节点不得从 messages 组装 prompt
     # 保留在 State 而非异步写入外部日志的理由：
@@ -138,7 +142,7 @@ class MedicalState(TypedDict):
 
 #### 4.1.1a State 初始值规范
 
-`MedicalState` 为 `TypedDict`，LangGraph 不会自动填充缺省值。图启动时必须由调用方提供完整的初始 State，否则任何节点读取未初始化字段将触发 `KeyError`。
+`MedicalState` 实际是 **Pydantic `BaseModel`**(见 §4.1.1 实现形态注),Field 默认值机制接管字段填充。`create_initial_state(patient_id, patient_input)` 工厂仅显式传两个必填字段,其余 35 字段由 `Field(default_factory=...)` / 字段默认值自动填充。**checkpointer 反序列化老 state 时缺字段自动填默认值,不会触发 KeyError**(§9.2 第一类长生命周期路径的天然支持)。下表保留为字段清单与初始值的权威对照,仍是新增字段时必查的参考。
 
 **字段分类与初始值表**：
 
