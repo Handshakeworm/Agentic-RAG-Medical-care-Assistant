@@ -3,7 +3,7 @@
 当前完成:
 - block extractor 适配器(白名单 6 种 type 抽正文,黑名单返 None)
 - POC 验证完整切分主流程(《内分泌代谢病学第4版上册》),
-  位于 scripts/poc_chunking_endocrinology_v4/poc_chunk_book.py。
+  位于 scripts/poc_chunking_内分泌代谢病学_第4版上册/poc_chunk_book.py。
 
 待 port 到 production(本文件):
 - Step 1: 目录权威清单提取(POC: poc_build_toc_dict_*.py)
