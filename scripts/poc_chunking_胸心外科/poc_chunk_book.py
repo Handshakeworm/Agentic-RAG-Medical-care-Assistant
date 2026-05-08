@@ -384,6 +384,7 @@ def chunk_book() -> dict:
             is_split = len(parent_starts) > 1
             parent_title = f"{sec_title} >> {head}" if is_split else sec_title
 
+            parent_text = "\n\n".join(blk["text"] for blk in parent_blocks)
             parent_idx = len(parents)
             parents.append({
                 "parent_idx": parent_idx,
@@ -391,6 +392,8 @@ def chunk_book() -> dict:
                 "title": parent_title, "head": head,
                 "pg_start": parent_blocks[0]["pg"],
                 "len": parent_len,
+                "blocks": pb - pa,
+                "text": parent_text,
                 "is_split_from_section": is_split,
             })
 
@@ -402,6 +405,7 @@ def chunk_book() -> dict:
                     "pg_start": parent_blocks[0]["pg"],
                     "len": parent_len,
                     "blocks": pb - pa,
+                    "text": parent_text,
                     "is_reference": False,
                 })
             else:
@@ -411,6 +415,7 @@ def chunk_book() -> dict:
                 for cblocks in child_groups:
                     clen = sum(blk["len"] for blk in cblocks)
                     chead = cblocks[0]["text"].strip().replace("\n", " ")[:60]
+                    ctext = "\n\n".join(blk["text"] for blk in cblocks)
                     children.append({
                         "parent_idx": parent_idx,
                         "section_title": sec_title,
@@ -418,6 +423,7 @@ def chunk_book() -> dict:
                         "pg_start": cblocks[0]["pg"],
                         "len": clen,
                         "blocks": len(cblocks),
+                        "text": ctext,
                         "is_reference": False,
                     })
 

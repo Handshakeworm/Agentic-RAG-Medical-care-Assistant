@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import ARRAY, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import ARRAY, DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, insert as pg_insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -135,10 +135,23 @@ class Chunk(Base):
     )
     heading_path_id: Mapped[str] = mapped_column(Text, nullable=False)
     heading_path: Mapped[str] = mapped_column(Text, nullable=False)
-    relative_chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    # spec §3.1.4.2:子块用 "0/1/2...",特殊块用约定字符串("parent" / "table_summary:N" 等)
+    relative_chunk_index: Mapped[str] = mapped_column(Text, nullable=False)
     parent_chunk_id: Mapped[str | None] = mapped_column(
         Text, ForeignKey("chunks.chunk_id"), nullable=True
     )
+    # spec §2.4.2:parent / child / table / table_summary / chart / chart_summary / figure / figure_summary
+    chunk_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="child"
+    )
+    # summary chunk 反指源 chunk(table_summary→table 等);非 summary chunk 为 NULL
+    linked_chunk_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("chunks.chunk_id"), nullable=True
+    )
+    # 图表截图相对路径(table/chart/figure chunk 用);非图表 chunk 为 NULL
+    image_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # mineru sub_type(figure chunk 用,如 'flowchart');非 image 来源 chunk 为 NULL
+    sub_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     chunk_raw_text: Mapped[str] = mapped_column(Text, nullable=False)
     content_hash: Mapped[str] = mapped_column(Text, nullable=False)
 
@@ -150,7 +163,7 @@ class Chunk(Base):
         ARRAY(Text), nullable=True
     )
 
-    # 运维状态:pending / done / failed / skip(spec §2.4.2)
+    # 运维状态:pending / done / failed / skip / bm25_only(spec §2.4.2)
     embedding_status: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default="pending"
     )
@@ -176,6 +189,10 @@ def _chunk_upsert_stmt(records: list[dict]):
             "heading_path": stmt.excluded.heading_path,
             "relative_chunk_index": stmt.excluded.relative_chunk_index,
             "parent_chunk_id": stmt.excluded.parent_chunk_id,
+            "chunk_type": stmt.excluded.chunk_type,
+            "linked_chunk_id": stmt.excluded.linked_chunk_id,
+            "image_path": stmt.excluded.image_path,
+            "sub_type": stmt.excluded.sub_type,
             "chunk_raw_text": stmt.excluded.chunk_raw_text,
             "content_hash": stmt.excluded.content_hash,
             "title": stmt.excluded.title,
@@ -188,16 +205,23 @@ def _chunk_upsert_stmt(records: list[dict]):
     )
 
 
-def bulk_upsert_chunks(records: list[dict]) -> int:
+# PG 单条 prepared statement 参数 ≤ 65535(uint16)。chunks 表 17 列 × N records,
+# 安全阈值留 50% 余量 → 3000 records/批。
+_CHUNK_INSERT_BATCH_SIZE = 3000
+
+
+def bulk_upsert_chunks(records: list[dict], batch_size: int = _CHUNK_INSERT_BATCH_SIZE) -> int:
     """批量幂等 upsert chunks。返回处理的记录数。
 
     自动分两批:先 `parent_chunk_id IS NULL` 的父块,再子块——
     self-referential FK 非 deferrable,父块必须先存在。
+    每批再按 `batch_size` 切片避免触发 PG 65535 参数上限。
 
-    每条 record 必含 8 个核心字段(chunk_id / source_id / heading_path_id /
-    heading_path / relative_chunk_index / parent_chunk_id / chunk_raw_text /
-    content_hash);LLM 增强字段(title/summary/tags/hypothetical_questions)
-    与 embedding_status 可缺省,DB 默认值兜底。
+    每条 record 必含 9 个核心字段(chunk_id / source_id / heading_path_id /
+    heading_path / relative_chunk_index / parent_chunk_id / chunk_type /
+    chunk_raw_text / content_hash);LLM 增强字段(title/summary/tags/
+    hypothetical_questions)、图表字段(linked_chunk_id/image_path/sub_type)
+    与 embedding_status 可缺省,DB 默认值或 NULL 兜底。
     """
     if not records:
         return 0
@@ -206,10 +230,10 @@ def bulk_upsert_chunks(records: list[dict]) -> int:
     children = [r for r in records if r.get("parent_chunk_id") is not None]
 
     with session_scope() as s:
-        if parents:
-            s.execute(_chunk_upsert_stmt(parents))
-        if children:
-            s.execute(_chunk_upsert_stmt(children))
+        for i in range(0, len(parents), batch_size):
+            s.execute(_chunk_upsert_stmt(parents[i : i + batch_size]))
+        for i in range(0, len(children), batch_size):
+            s.execute(_chunk_upsert_stmt(children[i : i + batch_size]))
     return len(records)
 
 

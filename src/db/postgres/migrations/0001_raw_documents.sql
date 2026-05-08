@@ -19,8 +19,8 @@ CREATE TABLE IF NOT EXISTS raw_documents (
 
     markdown_content TEXT NOT NULL,
     content_list     JSONB NOT NULL,
-    middle_data      JSONB,
-    model_data       JSONB,
+    middle_data      JSONB NOT NULL,
+    model_data       JSONB NOT NULL,
 
     pdf_path         TEXT NOT NULL
 );

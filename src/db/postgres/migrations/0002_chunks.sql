@@ -10,8 +10,12 @@ CREATE TABLE IF NOT EXISTS chunks (
     source_id             TEXT NOT NULL REFERENCES sources(source_id),
     heading_path_id       TEXT NOT NULL,
     heading_path          TEXT NOT NULL,
-    relative_chunk_index  INT  NOT NULL,
+    relative_chunk_index  TEXT NOT NULL,
     parent_chunk_id       TEXT REFERENCES chunks(chunk_id),
+    chunk_type            VARCHAR(20) NOT NULL DEFAULT 'child',
+    linked_chunk_id       TEXT REFERENCES chunks(chunk_id),
+    image_path            TEXT,
+    sub_type              VARCHAR(20),
     chunk_raw_text        TEXT NOT NULL,
     content_hash          TEXT NOT NULL,
 
@@ -31,8 +35,11 @@ CREATE INDEX IF NOT EXISTS idx_chunks_source_id        ON chunks (source_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_heading_path_id  ON chunks (heading_path_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_content_hash     ON chunks (content_hash);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding_status ON chunks (embedding_status)
-    WHERE embedding_status != 'done';
+    WHERE embedding_status NOT IN ('done', 'skip', 'bm25_only');
 CREATE INDEX IF NOT EXISTS idx_chunks_parent_chunk_id  ON chunks (parent_chunk_id)
     WHERE parent_chunk_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_chunks_linked_chunk_id  ON chunks (linked_chunk_id)
+    WHERE linked_chunk_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_chunks_chunk_type       ON chunks (chunk_type);
 
 COMMIT;

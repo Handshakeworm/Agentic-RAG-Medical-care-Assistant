@@ -172,14 +172,16 @@ def _real_start_positions(flat: list[dict], result: dict) -> dict[int, tuple[int
         if pos is None:
             continue
         gap = prefix[pos] - prefix[prev_pos + 1] if prev_pos is not None else 0
+        full_path = (parent_path + " / " + dict_title) if parent_path else dict_title
         matched.append({"pos": pos, "level": level, "title": dict_title,
+                        "path": full_path,
                         "action": action, "gap": gap})
         prev_pos = pos
 
     groups = defaultdict(list)
     for m in matched:
         groups[(m["level"], m["title"])].append(m)
-    real_start_pos: dict[int, tuple[int, str]] = {}
+    real_start_pos: dict[int, tuple[int, str, str]] = {}
     for key, recs in groups.items():
         recs.sort(key=lambda r: r["pos"])
         strong = [
@@ -193,7 +195,8 @@ def _real_start_positions(flat: list[dict], result: dict) -> dict[int, tuple[int
             # 退化:AS_IS 永远优先 PAGE_HEADER_FB(神经外科学 2026-05-05 发现 bug 后修)
             non_fb = [i for i, r in enumerate(recs) if r["action"] != "PAGE_HEADER_FB"]
             chosen = non_fb[-1] if non_fb else len(recs) - 1
-        real_start_pos[recs[chosen]["pos"]] = (recs[chosen]["level"], recs[chosen]["title"])
+        r = recs[chosen]
+        real_start_pos[r["pos"]] = (r["level"], r["title"], r["path"])
     return real_start_pos
 
 
@@ -451,7 +454,7 @@ def chunk_book() -> dict:
         a = section_splits[i]
         b_end = section_splits[i + 1] if i + 1 < len(section_splits) else len(flat)
         section_blocks_full = flat[a:b_end]
-        level, sec_title = real_start_pos[a]
+        level, sec_title, _sec_path = real_start_pos[a]
 
         # 参考文献丢弃:扫到"参考文献"标题就截断,该位置及之后全部丢弃
         # (包括 ref 条目 + 扩展资源占位列表)
@@ -488,6 +491,7 @@ def chunk_book() -> dict:
             is_split = len(parent_starts) > 1
             parent_title = f"{sec_title} >> {head}" if is_split else sec_title
 
+            parent_text = "\n\n".join(blk["text"] for blk in parent_blocks)
             parent_idx = len(parents)
             parents.append({
                 "parent_idx": parent_idx,
@@ -495,6 +499,8 @@ def chunk_book() -> dict:
                 "title": parent_title, "head": head,
                 "pg_start": parent_blocks[0]["pg"],
                 "len": parent_len,
+                "blocks": pb - pa,
+                "text": parent_text,
                 "is_split_from_section": is_split,
             })
 
@@ -508,6 +514,7 @@ def chunk_book() -> dict:
                     "pg_start": parent_blocks[0]["pg"],
                     "len": parent_len,
                     "blocks": pb - pa,
+                    "text": parent_text,
                     "is_reference": False,
                 })
             else:
@@ -517,6 +524,7 @@ def chunk_book() -> dict:
                 for cblocks in child_groups:
                     clen = sum(blk["len"] for blk in cblocks)
                     chead = cblocks[0]["text"].strip().replace("\n", " ")[:60]
+                    ctext = "\n\n".join(blk["text"] for blk in cblocks)
                     children.append({
                         "parent_idx": parent_idx,
                         "section_title": sec_title,
@@ -524,6 +532,7 @@ def chunk_book() -> dict:
                         "pg_start": cblocks[0]["pg"],
                         "len": clen,
                         "blocks": len(cblocks),
+                        "text": ctext,
                         "is_reference": False,
                     })
 

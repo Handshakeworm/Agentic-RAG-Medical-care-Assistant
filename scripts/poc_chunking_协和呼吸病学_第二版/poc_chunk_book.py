@@ -48,13 +48,21 @@ RE_FIG_TITLE = re.compile(r"^图\s*[\d\-]+")
 # Pass 1 anchor:第N节(本书首次用节当 Pass 1,因为字典只到章)
 RE_JIE = re.compile(r"^第\s*[一二三四五六七八九十百零]+\s*节(?=\s|$)")
 
-# Pass 2 anchor:【...】(节内主题切换,本书 type=title 中 2003 个,密度极高)
+# Pass 2 anchor:一、二、三、(节内一级编号小节,2026-05-07 补;
+# 字典只到章级,内部"一、X分析"等没进 dict,导致【】子 anchor 跨小节同名重复)
+RE_CN_NUM = re.compile(r"^[一二三四五六七八九十百]+、")
+
+# Pass 2 同级 anchor:附 N X(章末附录子节,与"一、二、"同语义层级——
+# 都是 章 下面的一级子节,只是命名风格不同;不在 toc dict 但是真实层级,2026-05-07 补)
+RE_FU_NUM = re.compile(r"^附\s*\d+\s+\S")
+
+# Pass 3 anchor:【...】(节内主题切换,本书 type=title 中 2003 个,密度极高)
 RE_BRACKET = re.compile(r"^【[^】]+】\s*$")
 
-# Pass 3 anchor:(一)(二)
+# Pass 4 anchor:(一)(二)
 RE_PAREN_CN = re.compile(r"^[（(][一二三四五六七八九十百]+[)）]")
 
-# Pass 4 anchor:1. 2. 3.(救【】内部纯列表段、(一) 内部连贯论述)
+# Pass 5 anchor:1. 2. 3.(救【】内部纯列表段、(一) 内部连贯论述)
 # 必须有"数字 + 点 + 空白/非空白",防表/图标题误命中(表 1-2 不算)
 RE_NUMDOT = re.compile(r"^\d+\s*[\.、]\s*\S")
 
@@ -208,8 +216,32 @@ def _is_jie_subheading(text: str, *, block_type: str | None = None) -> bool:
     return bool(RE_JIE.match(s))
 
 
+def _is_cn_num_subheading(text: str, *, block_type: str | None = None) -> bool:
+    """Pass 2 切分点:一、二、三、(节内一级编号小节,2026-05-07 补)"""
+    if block_type == "list":
+        return False
+    s = text.strip()
+    if len(s) < 3:
+        return False
+    if RE_TABLE_TITLE.match(s) or RE_FIG_TITLE.match(s):
+        return False
+    return bool(RE_CN_NUM.match(s))
+
+
+def _is_fu_num_subheading(text: str, *, block_type: str | None = None) -> bool:
+    """Pass 2 同级:附 N X(章末附录子节,与 一、二、 同语义层级)"""
+    if block_type == "list":
+        return False
+    s = text.strip()
+    if len(s) < 4:
+        return False
+    if RE_TABLE_TITLE.match(s) or RE_FIG_TITLE.match(s):
+        return False
+    return bool(RE_FU_NUM.match(s))
+
+
 def _is_bracket_subheading(text: str, *, block_type: str | None = None) -> bool:
-    """Pass 2 切分点:【...】(节内主题切换)"""
+    """Pass 3 切分点:【...】(节内主题切换)"""
     if block_type == "list":
         return False
     s = text.strip()
@@ -221,7 +253,7 @@ def _is_bracket_subheading(text: str, *, block_type: str | None = None) -> bool:
 
 
 def _is_paren_subheading(text: str, *, block_type: str | None = None) -> bool:
-    """Pass 3 切分点:(一)(二)"""
+    """Pass 4 切分点:(一)(二)"""
     if block_type == "list":
         return False
     s = text.strip()
@@ -233,7 +265,7 @@ def _is_paren_subheading(text: str, *, block_type: str | None = None) -> bool:
 
 
 def _is_numdot_subheading(text: str, *, block_type: str | None = None) -> bool:
-    """Pass 4 切分点:1. 2. 3.(救【】内部纯列表段)"""
+    """Pass 5 切分点:1. 2. 3.(救【】内部纯列表段)"""
     if block_type == "list":
         return False
     s = text.strip()
@@ -257,9 +289,10 @@ def _find_ref_idx(section_blocks: list[dict]) -> int | None:
 
 LEVEL_SECTION = 0
 LEVEL_JIE = 1       # 第N节(本书 Pass 1)
-LEVEL_BRACKET = 2   # 【...】(本书 Pass 2)
-LEVEL_PAREN = 3     # (一)(本书 Pass 3)
-LEVEL_NUMDOT = 4    # 1.(本书 Pass 4)
+LEVEL_CN_NUM = 2    # 一、二、三、(本书 Pass 2,2026-05-07 补)
+LEVEL_BRACKET = 3   # 【...】(本书 Pass 3)
+LEVEL_PAREN = 4     # (一)(本书 Pass 4)
+LEVEL_NUMDOT = 5    # 1.(本书 Pass 5)
 
 
 def _split_big_parent(section_blocks: list[dict], threshold: int,
@@ -290,10 +323,12 @@ def _split_big_parent(section_blocks: list[dict], threshold: int,
         return sorted(seen.items())
 
     pass1 = _refine([(0, LEVEL_SECTION)], _is_jie_subheading, LEVEL_JIE, threshold)
-    pass2 = _refine(pass1, _is_bracket_subheading, LEVEL_BRACKET, PARENT_REFINE_THRESHOLD)
-    pass3 = _refine(pass2, _is_paren_subheading, LEVEL_PAREN, PARENT_PASS3_THRESHOLD)
-    pass4 = _refine(pass3, _is_numdot_subheading, LEVEL_NUMDOT, PARENT_PASS4_THRESHOLD)
-    return pass4
+    pass2a = _refine(pass1, _is_cn_num_subheading, LEVEL_CN_NUM, threshold)
+    pass2b = _refine(pass2a, _is_fu_num_subheading, LEVEL_CN_NUM, threshold)
+    pass3 = _refine(pass2b, _is_bracket_subheading, LEVEL_BRACKET, PARENT_REFINE_THRESHOLD)
+    pass4 = _refine(pass3, _is_paren_subheading, LEVEL_PAREN, PARENT_PASS3_THRESHOLD)
+    pass5 = _refine(pass4, _is_numdot_subheading, LEVEL_NUMDOT, PARENT_PASS4_THRESHOLD)
+    return pass5
 
 
 def _split_parent_to_children_by_size(parent_blocks, target, min_size=0):
@@ -433,6 +468,7 @@ def chunk_book() -> dict:
             is_split = len(parent_starts) > 1
             parent_title = f"{sec_title} >> {head}" if is_split else sec_title
 
+            parent_text = "\n\n".join(blk["text"] for blk in parent_blocks)
             parent_idx = len(parents)
             parents.append({
                 "parent_idx": parent_idx,
@@ -440,6 +476,8 @@ def chunk_book() -> dict:
                 "title": parent_title, "head": head,
                 "pg_start": parent_blocks[0]["pg"],
                 "len": parent_len,
+                "blocks": pb - pa,
+                "text": parent_text,
                 "is_split_from_section": is_split,
             })
 
@@ -451,6 +489,7 @@ def chunk_book() -> dict:
                     "pg_start": parent_blocks[0]["pg"],
                     "len": parent_len,
                     "blocks": pb - pa,
+                    "text": parent_text,
                     "is_reference": False,
                 })
             else:
@@ -460,6 +499,7 @@ def chunk_book() -> dict:
                 for cblocks in child_groups:
                     clen = sum(blk["len"] for blk in cblocks)
                     chead = cblocks[0]["text"].strip().replace("\n", " ")[:60]
+                    ctext = "\n\n".join(blk["text"] for blk in cblocks)
                     children.append({
                         "parent_idx": parent_idx,
                         "section_title": sec_title,
@@ -467,6 +507,7 @@ def chunk_book() -> dict:
                         "pg_start": cblocks[0]["pg"],
                         "len": clen,
                         "blocks": len(cblocks),
+                        "text": ctext,
                         "is_reference": False,
                     })
 

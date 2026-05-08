@@ -50,7 +50,7 @@ def _make_parent(sid: str, suffix: str) -> dict:
         "source_id": sid,
         "heading_path_id": f"hp_{suffix}",
         "heading_path": f"第{suffix}章",
-        "relative_chunk_index": 0,  # 父块用 0(spec 实际用 "parent" 字符串入哈希,但表里这是 INT,父块也得给数字)
+        "relative_chunk_index": "parent",  # spec §3.1.4.2 父块约定:固定字符串 "parent"
         "parent_chunk_id": None,
         "chunk_raw_text": f"父块原文 {suffix}",
         "content_hash": f"hash_p_{suffix}",
@@ -64,7 +64,7 @@ def _make_child(sid: str, parent_id: str, idx: int) -> dict:
         "source_id": sid,
         "heading_path_id": parent_id.split("_", 1)[1],  # 简化:复用 parent 的 hp
         "heading_path": f"第x章 子块{idx}",
-        "relative_chunk_index": idx,
+        "relative_chunk_index": str(idx),  # spec §3.1.4.2:子块用 "0/1/2..." 字符串
         "parent_chunk_id": parent_id,
         "chunk_raw_text": f"子块原文 {idx}",
         "content_hash": f"hash_c_{idx}",

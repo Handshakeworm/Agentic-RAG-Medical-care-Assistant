@@ -345,6 +345,7 @@ def chunk_book():
             is_split = len(parent_starts) > 1
             parent_title = f"{sec_title} >> {head}" if is_split else sec_title
 
+            parent_text = "\n\n".join(blk["text"] for blk in parent_blocks)
             parent_idx = len(parents)
             parents.append({
                 "parent_idx": parent_idx,
@@ -352,6 +353,8 @@ def chunk_book():
                 "title": parent_title, "head": head,
                 "pg_start": parent_blocks[0]["pg"],
                 "len": parent_len,
+                "blocks": pb - pa,
+                "text": parent_text,
                 "is_split_from_section": is_split,
             })
 
@@ -359,7 +362,7 @@ def chunk_book():
                 children.append({
                     "parent_idx": parent_idx, "section_title": sec_title, "head": head,
                     "pg_start": parent_blocks[0]["pg"], "len": parent_len,
-                    "blocks": pb - pa, "is_reference": False,
+                    "blocks": pb - pa, "text": parent_text, "is_reference": False,
                 })
             else:
                 child_groups = _split_parent_to_children_by_size(
@@ -367,10 +370,11 @@ def chunk_book():
                 for cblocks in child_groups:
                     clen = sum(blk["len"] for blk in cblocks)
                     chead = cblocks[0]["text"].strip().replace("\n", " ")[:60]
+                    ctext = "\n\n".join(blk["text"] for blk in cblocks)
                     children.append({
                         "parent_idx": parent_idx, "section_title": sec_title, "head": chead,
                         "pg_start": cblocks[0]["pg"], "len": clen,
-                        "blocks": len(cblocks), "is_reference": False,
+                        "blocks": len(cblocks), "text": ctext, "is_reference": False,
                     })
 
     stats = {
