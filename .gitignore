@@ -22,3 +22,6 @@ scripts/enrichment_output/
 
 # 图表 chunk 提取产物(disk-first manifest,体积大)
 scripts/figure_extract_output/
+
+# 图表 *_summary chunk 单步 enrichment LLM 产出(4 字段),disk-first 落点
+scripts/figure_enrichment_output/
