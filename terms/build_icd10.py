@@ -18,18 +18,16 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import os
 from pathlib import Path
 
 import pandas as pd
-from sentence_transformers import SentenceTransformer
-from transformers import BitsAndBytesConfig
 
 from src.db.milvus.terms_collection import (
     count_aliases,
     ensure_terms_collection,
     upsert_aliases,
 )
+from src.models.embedding_model import get_embedding_model
 
 
 def _make_record_id(concept_id: str, alias: str) -> str:
@@ -69,14 +67,6 @@ def build_records(df: pd.DataFrame) -> list[dict]:
     return records
 
 
-def load_embedding_model() -> SentenceTransformer:
-    bnb = BitsAndBytesConfig(load_in_8bit=True)
-    return SentenceTransformer(
-        os.environ["EMBEDDING_MODEL_PATH"],
-        model_kwargs={"quantization_config": bnb, "device_map": "auto"},
-    )
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="灌 ICD-10 北京临床版到 Milvus terms_collection")
     parser.add_argument("--icd-xlsx", type=Path, required=True, help="北京临床版 .xlsx 路径")
@@ -103,7 +93,7 @@ def main() -> None:
     print("category 分布:", dict(Counter(r["category"] for r in records)))
 
     print("\n=== 4. 加载 Embedding(8bit) ===")
-    model = load_embedding_model()
+    model = get_embedding_model()
 
     print("\n=== 5. 批量 Embedding ===")
     aliases = [r["alias"] for r in records]
@@ -111,8 +101,7 @@ def main() -> None:
         aliases,
         batch_size=args.batch_size,
         show_progress_bar=True,
-        convert_to_numpy=True,
-    ).tolist()
+    )
     for r, v in zip(records, vectors, strict=True):
         r["dense_vector"] = v
     print(f"已编码 {len(vectors)} 条向量,维度 {len(vectors[0])}")

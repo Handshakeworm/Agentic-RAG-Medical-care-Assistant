@@ -54,7 +54,7 @@ TERMS_FIELDS = [
         name="source_vocab",
         dtype=DataType.VARCHAR,
         max_length=16,
-        description="别名来源:PROJECT / ICD10CN / CMESH / CHIP",
+        description="别名来源:PROJECT / ICD10CN / CMESH",
     ),
     FieldSchema(
         name="icd10",
