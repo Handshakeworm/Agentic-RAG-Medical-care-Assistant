@@ -70,7 +70,7 @@
 | C1 | MinerU 产物加载器 | `src/rag/ingestion/mineru_loader.py` | 读取 `mineru_output/{name}/{backend}_auto/` 下的 `.md` + `content_list_v2.json`(v2 页级嵌套,见 2.4.4)；写入 PostgreSQL `raw_documents` 表；单元测试 |
 | C2 | Chunking(父子分块 + 表格双粒度) | `src/rag/ingestion/chunking.py` + 单本书 anchor 配置 | **非表格内容**:按 §3.1.2 4 步流程切分 — Step 1 目录权威清单提取、Step 2 正文节边界匹配 + REAL_START 选取、Step 3 全书层面截断 + 节内参考文献丢弃、Step 4 父块构建(节本身或节内三遍切【】+(一)+1.,严格层级合并)、Step 5 子块构建(size 驱动,目标 600 字,父块 ≤ 1200 字直接当 child)。父块 `embedding_status='skip'` 不向量化,子块多向量化。**表格内容**(识别 MinerU `content_list` 中的 table 类型块):产出两类 chunk —— ① 整表摘要 chunk(LLM 一句概括) ② 逐行 chunk(parse HTML 转自然语言);共享 `parent_chunk_id` 指向所在节父块。**非表格图像类**:只留图名/bbox 到 `raw_documents.content_list`,不进 chunks 表(见 §3.1.1 末)。**单元测试**:目录字典提取 / REAL_START 选取规则 / 三遍切阈值 / 严格层级合并 / 子块 size 累积算法(含 force-add 边界) / 父子覆盖完整性 mismatch=0。**12 本书验证**:每本按 §3.1.2 切分主流程跑 + 抽样人审 + 验 mismatch=0 |
 | C3 | 幂等性工具 | `src/rag/ingestion/idempotency.py` | source_id / heading_path_id / chunk_id / content_hash 生成逻辑与 3.1.4 一致；父块 chunk_id 固定使用 `relative_chunk_index="parent"` 参与哈希（见 3.1.4.2）；单元测试覆盖 normalize + 多级哈希 + 父块 ID 与子块 ID 不冲突验证 |
-| C4 | LLM 语义增强 | `src/rag/ingestion/enrichment.py`、`src/agent/schemas/ingestion.py`（`ChunkEnrichmentOutput`，定义与 §9.5 一致） | 单次 LLM 调用生成 title / summary / tags / hypothetical_questions；Prompt 来自 `src/prompts/ingestion.py`；单元测试（Mock LLM） |
+| C4 | LLM 语义增强 | `src/rag/ingestion/enrichment.py`、`src/agent/schemas/ingestion.py`（`ChunkEnrichmentOutput`，定义与 §9.5 一致） | 单次 LLM 调用生成 title / summary / hypothetical_questions（`tags` 字段保留兼容但不再生成,见 §3.1.3.2 末尾决策）；Prompt 来自 `src/prompts/ingestion.py`；单元测试（Mock LLM） |
 | C5 | 多向量 Embedding | `src/rag/ingestion/embedding.py` | 对每个 Chunk 生成 1 original + 1 summary + 2~3 question 向量记录；全部仅含 Dense 向量（Sparse 检索由 Milvus BM25 基于 original_content 文本字段实现）；批处理；content_hash 增量判断；单元测试 |
 | C6 | 三层存储写入 + 僵尸清理 | `src/rag/ingestion/storage.py` | PostgreSQL chunks 表 upsert（父块 `embedding_status='skip'` 直写，跳过 Milvus）+ 子块 Milvus 向量 upsert + 僵尸 chunk 差集清理（先删子块含 Milvus，再删父块仅 PostgreSQL，见 3.1.4.3）；集成测试覆盖父块/子块删除顺序与 foreign key 约束 |
 | C7 | Pipeline 编排 | `src/rag/ingestion/pipeline.py` | 串联 C1~C6；`python scripts/ingest.py <pdf_path>` 可完整摄取一份文档；集成测试 |
@@ -92,14 +92,14 @@
 
 ### 阶段 E：Retrieval（Dense + Sparse + RRF + Rerank）
 
-**目的**：在线查询链路跑通，输入用户 query，经预处理 → 双路召回 → 单阶段多路 RRF 融合 → 多向量去重 → 精排，输出 Top-K chunks（含 original_content + heading_path 引用信息），具备稳定回退策略。
+**目的**：在线查询链路跑通，输入用户 query，经预处理 → 双路召回 → 单阶段多路 RRF 融合 → 多向量聚合(sum-aggregate + vector_hits 副载荷) → 精排，输出 Top-K chunks（含 original_content + heading_path 引用信息），具备稳定回退策略。
 
 | 编号 | 任务 | 产出文件 | 验收标准 |
 |------|------|---------|---------|
 | E1 | 查询预处理（分路构建） | `src/rag/retrieval/query_processing.py` | 关键词提取 → 术语扩展（查 terms_collection）→ 生成 `sparse_queries`（每个症状维度一个词袋）；Dense Query 整合改写（LLM）→ 生成单一 `dense_query`；LLM 调用与 prompt 由 Agent ② `build_query` 节点直接持有（`src/prompts/agent.py` 的 `build_query_construction_prompt`），本模块只暴露确定性的关键词/术语扩展工具函数供 ② 调用；单元测试 |
 | E2 | Sparse Retriever（Milvus BM25） | `src/rag/retrieval/sparse_retriever.py` | 对 `sparse_queries` 中每个维度词袋分别查询 Milvus 内置 BM25，N 个维度 = N 次查询；各自返回 Top-N；单元测试 |
 | E3 | Dense Retriever（单次 ANN） | `src/rag/retrieval/dense_retriever.py` | 对 `dense_query` 做 Qwen3-Embedding-8B 编码 → Milvus ANN 向量检索，返回 Top-N；单元测试 |
-| E4 | 单阶段多路 RRF 融合 + 多向量去重 | `src/rag/retrieval/fusion.py` | Dense（1 路）+ Sparse 各维度（各 1 路）→ 单阶段多路 RRF → 按 source_chunk_id 去重（保留 RRF 最高分记录，original_content 冗余存储保证内容一致）→ Top-M；单元测试 |
+| E4 | 单阶段多路 RRF 融合 + 多向量聚合 | `src/rag/retrieval/fusion.py` | Dense（1 路）+ Sparse 各维度（各 1 路）→ 单阶段多路 RRF → 按 source_chunk_id 聚合(各 vector_type 命中分数求和 + 携带 `vector_hits` 副载荷) → Top-M;单元测试覆盖 sum-aggregate 公式与 vector_hits 形态(matched_text 三类取值规则) |
 | E5 | Reranker 精排 + 回退 | `src/rag/retrieval/reranker.py` | Cross-Encoder 在 `diagnose` ⑩ 前置调用，对收敛后候选精排截断 Top-K；超时/不可用时回退至 `candidate_chunks` 原序（3.2.3 策略）；单元测试 |
 | E6 | 元数据过滤（Pre-filter + Post-filter） | `src/rag/retrieval/` 各文件内 | Pre-filter：source_id / tags 在 Milvus 检索时过滤；Post-filter：在 Rerank 前兜底过滤；missing → include 宽松策略 |
 
@@ -228,10 +228,10 @@
 | 编号 | 任务名称 | 状态 | 完成日期 | 备注 |
 |------|---------|------|---------|------|
 | C1 | MinerU 产物加载器 | [x] | 2026-05-02 | `src/rag/ingestion/mineru_loader.py::load_mineru_output()`(177 行)读 4 文件 + **双清洗 image VLM 幻觉**(v2 `block.content.content` 删除 + 用同段文本作指纹精确 substring 删 markdown,短指纹 < 20 字符跳过防误删,清洗后 grep 自检 unclean 报 warning)+ source_id 走 C3 + upsert sources/raw_documents + 返回 stats dict(预留 H2/§5.2.3 埋点接口);保留 image_caption / image_footnote / bbox / `![](images/...)` 占位符 / table.html / chart.content / page_header 等(过滤归 C2);11 unit + 3 integration PASS;`scripts/load_mineru.py` 批量入口(单本/--all);**13 本教材全部灌入 PG**(13912 页 / 264948 block / 删 7426 image content / 0 指纹遗漏 / 22.6s,raw_documents 表占 273MB);顺手删 0 行僵尸文件 `image_caption.py` |
-| C2 | Chunking(父子分块 + 表格双粒度) | [~] | | 已:**step1 title.level 重建**(已弃案,见 §3.1.1 限制 2 / §3.1.2,改用目录权威清单);**step2 block extractor**(`extract_chunkable_text` 已实现,15 unit PASS);**POC 验证完整切分主流程**(`scripts/poc_chunking_endocrinology_v4/poc_chunk_book.py`,《内分泌代谢病学第4版上册》 1204 父块 / 3012 子块 / mismatch=0,详见 [METHODOLOGY.md](scripts/poc_chunking_endocrinology_v4/METHODOLOGY.md));待:**step3 把 POC port 到 production** `chunking.py` 主流程(目录字典+正文匹配+三遍切+严格层级合并+size 驱动子块切+书末截断+参考文献丢弃) / step4 table+chart 双粒度 / step5 12 本书逐本 anchor pattern 适配 + 切块验证 |
+| C2 | Chunking(父子分块 + 表格双粒度) | [~] | | 已:**step1 title.level 重建**(已弃案,见 §3.1.1 限制 2 / §3.1.2,改用目录权威清单);**step2 block extractor**(`extract_chunkable_text` 已实现,15 unit PASS);**step5 12 本书逐本 POC 全部完成**(2026-05-03 至 2026-05-06,12 本累计 ~12000 父块 / ~25000 子块,**全部 mismatch=0**);通用 SOP 沉淀至 [scripts/METHODOLOGY.md](scripts/METHODOLOGY.md)(~1200 行 + §11 27 条决策来源)+ 12 本 specific BOOK_NOTES.md;**chunks 表 schema 升级到位**(§3.1.2:chunk_type / linked_chunk_id / image_path / sub_type 字段 + relative_chunk_index 改 TEXT + embedding_status 加 bm25_only,为 step4 table+chart 双粒度铺路);**step4 chart/figure manifest+heading+多面板合并**(2026-05-08):`scripts/extract_figures.py`(4026 条 manifest)+ `scripts/derive_figure_heading_paths.py`(figure 块按 (pg_start, head 前缀) 反查 POC parent → 关联 heading_path,3891 hit / 135 孤儿)+ `scripts/merge_multipanel_figures.py`(方案 A':同 page + 同 heading_path + 严格相邻 + caption 必含「图 N-Y」模式 → 27 anchor 组吸纳 33 sibling,chunk_kind / sub_type 不做硬约束);**step4 table 跨页冗余去重**(2026-05-10~11):`scripts/merge_crosspage_tables.py`(识别 mineru 跨页冗余转录 sibling:同 head + 紧邻页 + sibling 空 cap + 表头一致 → 89 anchor 组吸纳 91 duplicate;新增 `merged_html_extension` 字段,sibling 真有新行时(loose-norm 全位置匹配)anchor 拿合并 html → 1 个 anchor 触发,实测 mineru 97% sibling 是冗余;`resolve_anchor_for_dup` 加 cluster 排除 dup 修穿透 bug,per-sibling 解析最近 anchor)+ `scripts/reroute_figure_in_table.py`(把 caption 写「图 N-X」但 chunk_kind=table 的 16 条改回 figure 走 vision LLM,html `<img src=` ≥5 张兜底);待:**step3 把 POC port 到 production** `chunking.py` 主流程 / **table 双粒度** chunks 表落库 + 逐行 chunk |
 | C2.5 | 用药指南专用处理(待定) | [ ] | | **背景**:《中国医师药师临床用药指南》是药典/reference book(每药品名独立 title,30289 条),通用"篇/章/节"chunking 策略不适用(C2-step1 验证 fallback 99.9%)。**候选方案**:A 药品级 chunker(每药品 → 1 条完整 chunk 含【适应症】【用法】【禁忌】) / B 改 PG `drug_reference` 表 + terms_collection alias linking(更贴药典 reference 本质,绕开 Milvus 模糊检索的 overkill)。**当前**:raw_documents 已灌(source_id `189905989d350dd2`),C2 主流程通过 exclude 列表跳过它,C5/C6 同样跳过,本 RAG 主线不阻塞。**决策时机**:C2 主流程 + 12 本 chunking 跑通后,根据实际检索召回率与产品场景独立 PR |
 | C3 | 幂等性工具 | [x] | 2026-05-02 | `src/rag/ingestion/idempotency.py` 6 个纯函数(normalize / source_id / heading_path_id / chunk_id / parent_chunk_id / content_hash);全部按 §3.1.4 规则,无 IO 无状态;30 unit PASS(覆盖 normalize 6 个、source_id 5、heading_path 5、chunk_id 3、parent 3、content_hash 4 + 综合 4) |
-| C4 | LLM 语义增强 | [ ] | | |
+| C4 | LLM 语义增强 | [~] | | 已:**child chunk enrichment 22287 条全跑完**(a44ca9cf,`scripts/enrichment.py` deepseek-v4-pro 16 并发,disk-first jsonl);**chart/figure summary 单步 4 字段 enrichment 1023/1023 完成**(2026-05-08~10,`scripts/figure_enrichment_generation.py` qwen3.5-plus 多模态 12 并发 + 16 条 reroute 走 vision,产出 medical_statement/title/summary/hypothetical_questions 一次到位 — 替代原 spec §3.1.3.2 的"两步"设计:vision LLM 看图直出 4 字段避免 Stage 2 enrichment 看不到图导致的视觉幻觉扩散),**0 fail** / 33 figure-multipanel sibling 合并到 anchor;**table summary 单步 4 字段 enrichment 2744/2744 完成**(2026-05-10~11,`scripts/table_enrichment_generation.py` deepseek-v4-pro 16 并发 ~2h,**0 fail**;91 跨页 duplicate skip;1 anchor 拿 49 char merged_html_extension 跑合并 html);新增 schema `FigureSummaryEnrichmentOutput`(§9.5)+ prompt 共享 `_SHARED_4FIELD_TAIL`(child 对齐:questions 临床/口语分布、英中文混排、空字段非空兜底、caption 杂质识别)+ **footnote 必传**(table/figure user template 都加,system prompt 强调"必须用 footnote 解读缩写/图例/单位定义,但不写参考文献条目入 ms");deepseek 用 `method="json_mode"` 避 BadRequest(json_schema 不支持);待:**child / figure / table enrichment 进 PG**(C5 多向量 + C6 三层存储) |
 | C5 | 多向量 Embedding | [ ] | | |
 | C6 | 三层存储写入 + 僵尸清理 | [ ] | | |
 | C7 | Pipeline 编排 | [ ] | | |
@@ -252,7 +252,7 @@
 | E1 | 查询预处理（分路构建） | [ ] | | |
 | E2 | Sparse Retriever（Milvus BM25） | [ ] | | |
 | E3 | Dense Retriever（单次 ANN） | [ ] | | |
-| E4 | 单阶段多路 RRF 融合 + 多向量去重 | [ ] | | |
+| E4 | 单阶段多路 RRF 融合 + 多向量聚合 | [ ] | | |
 | E5 | Reranker 精排 + 回退（diagnose ⑩ 前置） | [ ] | | |
 | E6 | 元数据过滤 | [ ] | | |
 

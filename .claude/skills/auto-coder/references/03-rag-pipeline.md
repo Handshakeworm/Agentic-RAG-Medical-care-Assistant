@@ -32,62 +32,76 @@
 
 #### 多类型内容处理策略
 
-项目数据源中存在大量多类型内容（表格、照片/简笔画、坐标图、思维导图），各类型处理策略如下：
+项目数据源含大量多类型内容(表格、流程图、统计图、影像图、化学结构、公式)。**2026-05-03 重新拍板**:只保留 **table / chart / image-flowchart** 三类做 chunk,其他全部在 chunking 阶段内存过滤丢弃(详细决策依据见 `非项目本体/图表等处理方式.md`)。
 
-**1. 表格 —— 双粒度存储（整表摘要 + 逐行拆分）**
+**保留三类的处理:对称 source chunk + summary chunk 架构**
 
-采用"整表摘要 + 分行存储"双存策略，兼顾宏观问题与细粒度检索：
+每类保留的 block 都生成两条 chunk:
+- **源 chunk**(`table` / `chart` / `figure`):`embedding_status='bm25_only'`,只挂 BM25 sparse 不进 Milvus dense;PG 存完整 payload(html / markdown / mermaid + caption + image_path + bbox + footnote)
+- **summary chunk**(`table_summary` / `chart_summary` / `figure_summary`):LLM 看源数据后生成 100-300 字"医学陈述体"描述,作为独立 chunk 走标准 §3.1.3 enrichment(再生成 summary + 2-3 question 向量),**dense 召回主力**
 
-- **逐行拆分存储（细粒度）**：将每一行转为自然语言句子后 embedding，例如：
-  > "肺血管疾病包括：肺栓塞、肺动脉高压、肺静脉闭塞病"
-  > "神经肌肉疾病包括：肌萎缩侧索硬化症、吉兰-巴雷综合征"
+| 类型 | 源 chunk content | summary 生成 LLM 输入 |
+|---|---|---|
+| `table` | caption + html + footnote | **text LLM** 看 html → 医学陈述 |
+| `chart` | caption + markdown 数据表 + 截图 | **vision LLM** 看截图(markdown 作辅助提示)→ 医学陈述 |
+| `image-flowchart` | caption + mermaid 代码 + 截图 | **vision LLM** 看截图(mermaid 作辅助提示)→ 医学陈述 |
 
-- **整表摘要存储（粗粒度）**：存储一条整表概括性描述，用于回答"这张表讲什么"类宏观问题，例如：
-  > "表2-1-1是呼吸疾病分类表，按类别列举了气流受限性肺疾病、肺实质疾病、肺血管疾病、感染性肺疾病、恶性肿瘤、呼吸衰竭等十大类及其代表性疾病"
+source chunk 与 summary chunk 通过 PG `chunks.linked_chunk_id`(summary 反指 source)关联,共享同一 `heading_path_id`。Milvus 命中 summary 后回 PG 拉源 chunk 作为 LLM 消费 payload。**消费侧 LLM 选型对齐 ingest 侧**:命中 `figure` / `chart` 时给消费 LLM(node ⑩ diagnose 等)直接喂截图(payload 里的 image_path);命中 `table` 时只喂 html(text LLM 已足够)。
 
-- **保留元数据**：存储时附带原始表格位置信息，便于溯源。单行存储格式示例：
+**丢弃五类的理由**:
+- `image - chemical / natural_image / None`:CT/MRI/化学截图喂多模态 LLM 也用不好(教科书 200KB 截图非诊断级 DICOM,缺乏 SMILES/InChI 等结构化标准)
+- `image - text_image`:实测 90% 是出版社推广页(扫码激活/在线服务),少量解剖标注图无法可靠从噪音中分离
+- `equation_interline`:量太小(典型一本书 8-50 个),公式通常已在所属段落文字描述里带过,单独入库 ROI 极低
 
-```json
-{
-  "text": "肺血管疾病包括：肺栓塞、肺动脉高压",
-  "source": "第2章第1节",
-  "table": "表2-1-1",
-  "row": 5
-}
-```
+**为什么不扩展到被丢类型中的"医学示意图"**(2026-05-08 实测后再确认):全 12 本扫被丢的 7475 条 image,caption 关键词命中"分诊潜在高价值"约 ~917 条(解剖位置 505 / 体表病变 228 / 体征查体 136 / 皮肤外观 48,主要被 mineru 错判到 `text_image` / `natural_image` / `None`)。**坚持不扩**,理由三层叠加:
+1. **vision LLM 能力分级**:保留的 3 类(table/chart/figure)是**模式化视觉**(html 表、数据图、流程图都有标准视觉范式),vision LLM 可靠性可控;扩进来的 natural_image / text_image 是**自由形态视觉**(CT/MRI 影像、皮疹照片、解剖摄影),vision LLM 看自由形态医学图像可靠性低一个量级,易引入幻觉污染
+2. **正文已覆盖**:解剖位置 / 体表分区 / 皮疹外观等医学事实在所属节正文里都有等价文字描述(如"胸骨柄位于...第 2 肋对应胸骨角");summary 跟正文 cosine 去重(§3.1.2 阈值 0.85)会大量丢这些 summary,召回增益小但已付出 vision 幻觉风险
+3. **前端 UI 与 RAG 召回是两件事**:真正"非看图不可"的类型(典型皮肤病例图)价值在前端给患者视觉对比,这是产品 UI 功能,不归 RAG chunk 库承担
 
-**2. 思维导图 —— 暂不支持内容理解**
+**关键约束(为什么必须独立成 chunk,不能 inline 进父子文本块)**:
+1. mineru block 在 `content_list_v2.json` 里按版面位置排,**不严格按引用关系**(实测一页里 table 在页头,讨论它的段落在页中段)
+2. 实测 18% table、7% flowchart 单 block 字符数 > 1200 字父块目标(max 7080),**强行 inline 会撑爆父块大小**
+3. 因此通过 `heading_path_id` + PG `linked_chunk_id` 做关联召回,而不是 inline 合并
 
-思维导图结构杂乱且可能包含嵌套图片，当前版本不支持内容解析。仅保留图名以便引用。
+**LLM 选型(2026-05-08 实测后修订)**:**按 mineru 转录可靠性分流**——
 
-**3. 坐标图 —— 暂不支持内容理解**
+- **table → text LLM 看 html**:mineru 表格 OCR 质量稳定(html 行列完整、caption/footnote 单独成字段),text LLM 看 html 是 text→text 任务,成本低质量稳
+- **chart → vision LLM 看截图**:实测 mineru 把曲线图 OCR 成 markdown 时**信息丢失严重**(心电图 36 条 markdown 仅标各导联峰值高低,完全不含 P 波/QRS/ST 段细节;部分 forest plot / heatmap 视觉对比信息也丢)。markdown 同时作为辅助 prompt 提示给 vision LLM(让它有数据点参考,但以截图为真值)
+- **figure → vision LLM 看截图**:实测 mineru 转 mermaid 在复杂分子机制图 / 蛋白结构图被错判为 flowchart 时会**链式爆炸**(单 label 重复 50+ 次)等系统性缺陷,~14% mermaid 不可用;此外 mermaid 看不出"逻辑顺序错"等隐蔽错误。mermaid 同样作为辅助 prompt 提示
 
-不支持理解坐标图中的复杂内涵。仅保留图名以便引用。
-
-**4. 照片/简笔画/影像图 —— 暂不支持内容理解**
-
-不支持理解影像类内容。仅保留图名以便引用。
+成本(全 12 本一次性 ingest):table 2980 × $0.005 + (chart 320 + figure 726) × $0.05 ≈ **$67**(¥480)。比"统一 text LLM"贵 3 倍但消除 mineru 转录质量风险,生产消费侧也对齐这套(命中 figure/chart 直接喂截图)。
 
 ---
 
-> **关于图像内容理解的设计原则**：当前摄取管道**只对表格做内容理解**（双粒度存储），其他图像类型（思维导图、坐标图、照片/简笔画、影像图）一律仅保留图名/位置信息，不引入 Vision LLM 生成 caption。理由有三：
-> 1. **医学教材约定图配文**：图表达的核心信息几乎总在周围正文里重复，丢图不丢信息
-> 2. **Vision LLM 对医学图像理解准确性不足**：坐标轴读错、教学图的"结论"被当作真实证据等，会向 Milvus 注入幻觉证据并长期污染检索
-> 3. **医疗合规**：诊断依据需可追溯到权威文本，不依赖 Vision LLM 的概率性输出
+> **关于图像内容理解的设计原则(2026-05-08 修订)**:
+> 1. **教科书图配文约定**:图表达的核心信息一般在周围正文里重复,正文召回往往可以兜底,但**对纯数据图(检验值表、诊断流程图)正文无法替代** —— 这是引入 summary chunk 的根本理由
+> 2. **按 mineru 转录可靠性分流 LLM**:table 用 text LLM 看 html(mineru OCR 稳)、chart/figure 用 vision LLM 看截图(mineru markdown/mermaid 转录有系统性缺陷,实测 ~14% figure mermaid 链式爆炸,心电图 markdown 完全失效)。原"统一 text LLM"的设计已废弃 —— 实证表明垃圾结构化文本喂 text LLM 比让 vision LLM 看真截图更易引入幻觉
+> 3. **medical compliance**:诊断依据可追溯到权威文本(源 chunk 仍存 mineru 结构化转录与截图路径,可校验);summary chunk 是召回辅助层,不作为权威依据出现在最终诊断引用中
 >
-> 患者实时上传的检查报告走独立路径（见 Agent ①.5 / ⑨），Vision LLM 直读并结构化为 `report_findings`，与本节知识库摄取不共用机制。
+> 患者实时上传的检查报告走独立路径(见 Agent ①.5 / ⑨),Vision LLM 直读并结构化为 `report_findings`,与本节知识库摄取不共用机制。
 
 #### MinerU 解析的已知限制与下游补救
 
 实测 hybrid-auto-engine 在医学教科书上整体质量优秀(表格 HTML 行列完整、caption/footnote 单独成字段、chart 把曲线图 OCR 成 markdown 数据表、page_header/footer/number 单独识别可干净过滤),但有两处**系统性限制**需要在加载/切分阶段主动处理。这两点不是某本书的特例,换 backend 或重跑无法解决,**必须在代码层补救**。
 
-**限制 1:image 块的 `content` 字段约 50% 含 VLM 幻觉(loader 阶段补救)**
+**限制 1:image 块的 `content` 字段质量随 sub_type 差异巨大(loader + chunking 两阶段处理)**
 
-MinerU 对 `sub_type=text_image`(含文字的图片)会调用 VLM 自动生成 `content` 字段,实测 50% 是无意义重复(如把"获取数字资源步骤页"识别成 "1. 体验智能学习, 2-99. 站体教学")。`natural_image / flowchart` 类相对可靠但仍不可信。
+MinerU 对 `type=image` 不同 sub_type 的 `content` 字段质量差别很大,实测:
 
-**应对**:`mineru_loader.py` 加载时对所有 `type=image` 的块**直接丢弃 content 字段**,只保留 `image_caption / image_footnote / bbox / image_source.path`。本设计与上文"图像内容理解的设计原则"一致(不依赖 Vision LLM 概率性输出)。
+| sub_type | content 字段质量 | 处理 |
+|---|---|---|
+| `flowchart` | **mermaid graph 代码**,节点+连线还原,质量高 | **保留**(在 chunking 阶段进入 `figure` 源 chunk + `figure_summary` 生成) |
+| `text_image` | OCR 文本,但 90% 是出版社推广页噪音(如"扫码激活/在线服务") | 丢弃 image content + 整块在 chunking 过滤 |
+| `chemical` | 自然语言描述非 SMILES,质量参差 | 丢弃 image content + 整块在 chunking 过滤 |
+| `natural_image / None` | VLM 泛泛描述("Abstract red background"等),无医学价值 | 丢弃 image content + 整块在 chunking 过滤 |
 
-注意:`type=table` 和 `type=chart` 块的 `content` 字段必须**保留**(分别是 HTML 表格和 markdown 数据表,质量高且为信息核心载体)。仅 `type=image` 丢弃 content。
+**Loader 阶段(mineru_loader.py)**:为兼容历史方案 + 保 raw_documents 完整,**当前继续对所有 `type=image` 块统一删除 `content.content` 字段**(包括 flowchart 的 mermaid)。flowchart 的 mermaid 在下游 chunking 阶段重新从 raw 取(因为 raw_documents 保留的是删 image VLM 文本前的原始 content_list,但本字段已删)。
+
+**修正方案(待实现)**:loader 改为按 sub_type 选择性删除,只删 `text_image / chemical / natural_image / None` 的 content,**保留 flowchart 的 mermaid**。这一改动可以同步进行也可以延后(chunking 阶段从 mineru 输出文件直接读 mermaid 也行,raw_documents 内容可不严格同步)。
+
+注意:`type=table` 和 `type=chart` 块的 `content` 字段必须**保留**(分别是 HTML 表格和 markdown 数据表,质量高且为信息核心载体)。
+
+**Chunking 阶段(chunking.py)**:按上文"多类型内容处理策略"做内存过滤 — table / chart / image-flowchart 三类各生成"源 chunk + summary chunk"两条;image 其他 sub_type + equation_interline 直接 continue 不进 chunks 表。mineru 产物文件永久不变,丢弃只发生在内存过滤,决策可逆。
 
 **限制 2:`title.level` 全部退化为 1(已弃案:正则重建 → 改用目录权威清单)**
 
@@ -113,31 +127,41 @@ MinerU 输出的 `content_list_v2.json` 中所有 title 块的 `level` 字段统
 - **不用 `RecursiveCharacterTextSplitter`**(已弃案)
 - 父块由"书的目录结构"切(节 + 节内三遍切【】+(一)+1.),子块由"父块大小"切(size 累积驱动)
 - 父子结构**仅对真正大的父块有意义**:小父块直接当 child(避免 degenerate "父=子")
-- POC 实现与详细方法论见 [`scripts/poc_chunking_endocrinology_v4/METHODOLOGY.md`](scripts/poc_chunking_endocrinology_v4/METHODOLOGY.md);production 实现位 `src/rag/ingestion/chunking.py`(待 port)
+- POC 实现与详细方法论见 [`scripts/poc_chunking_内分泌代谢病学_第4版上册/METHODOLOGY.md`](scripts/poc_chunking_内分泌代谢病学_第4版上册/METHODOLOGY.md);production 实现位 `src/rag/ingestion/chunking.py`(待 port)
 
 ### Block 白名单与文本抽取规则(消费 `content_list_v2` 前必读)
 
 `raw_documents.content_list` 的真实结构与 10 种 `block.type` 见 §2.4.4.1。chunking 阶段**必须**按下表分类处理。
 
-**白名单(进入 chunking pipeline 的 6 种 type)**:
+**进入文本父子分块的 3 种 type(累积进 parent/child 文本)**:
 
 | type | 抽取规则(从 `block.content` 取正文) | 用途 |
 |---|---|---|
 | `title` | 拼 `title_content[].content`(`type=text` 子项)。**忽略 `level` 字段**(永远 1,见 §3.1.1 限制 2),改用目录权威清单匹配确定 level | 父块边界候选(节级匹配)+ 节内子标题边界候选(【】/(一)/1. 正则) |
 | `paragraph` | 拼 `paragraph_content[].content`(`type=text` 子项) | 父块/子块的正文输入 |
 | `list` | 递归遍历 `list_items[].item_content[].content`(深 4 层),按 `list_type` 决定是否加 `1./- ` 前缀。**整体作为不可分语义单元**,首项 `1.` 不当子标题切点 | 父块/子块累积输入 |
-| `table` | `table_caption` + `html` + `table_footnote`,**双粒度**:① 整表摘要 chunk(LLM 改写 → 一句"这张表讲什么")② 逐行 chunk(parse HTML 把每行转自然语言句子) | 整表 chunk + N 个行 chunk,共享 `parent_chunk_id` |
-| `chart` | `chart_caption` + `content`(content 已是 markdown 数据表) | 同 table 双粒度 |
-| `equation_interline` | `math_content`(latex 字符串)+ 上下文 paragraph | 不单独成 chunk,作为所在父块 inline 内容 |
 
-**黑名单(直接丢弃,不进 chunks 表)**:
+**进入图表独立 chunk 路径的 3 种 type(每个 block 生成"源 chunk + summary chunk"两条)**:
 
-| type | 丢弃理由 |
+| type / sub_type | 源 chunk(`chunk_type`)payload | summary chunk(`chunk_type`)生成 |
+|---|---|---|
+| `table` | `table` — caption + html + footnote + image_path + bbox | `table_summary` — text LLM 看 html → 100-300 字医学陈述 |
+| `chart` | `chart` — caption + markdown 数据表 + image_path | `chart_summary` — text LLM 看 markdown |
+| `image` + `sub_type=flowchart` | `figure` — caption + mermaid + image_path + sub_type | `figure_summary` — text LLM 看 mermaid |
+
+源 chunk `embedding_status='bm25_only'`(不进 dense Milvus,只挂 BM25 sparse);summary chunk 走标准 §3.1.3 enrichment(再生成 summary + 2-3 question 向量)。两者通过 PG `chunks.linked_chunk_id`(summary 反指 source)关联,共享同一 `heading_path_id`。理由与详细架构见 §3.1.1 "多类型内容处理策略"。
+
+**全部丢弃的 type / sub_type(直接 continue,不进 chunks 表)**:
+
+| type / sub_type | 丢弃理由 |
 |---|---|
 | `page_header` / `page_footer` / `page_number` | 页眉/脚/页码,与正文无关 |
-| `image` | content 字段 50% VLM 幻觉(§3.1.1 限制 1);`image_caption/bbox` 在 raw_documents 保留供版面追溯,但不进 chunks |
+| `image` + `sub_type ∈ {chemical, text_image, natural_image, None}` | mineru 转录质量低且喂多模态 LLM 也用不好,详见 §3.1.1 |
+| `equation_interline` | 数量小(典型一本书 8-50 个),公式通常已在所属段落文字描述里带过 |
 
-**实现位置**:`src/rag/ingestion/chunking.py::extract_chunkable_text(block) -> str | None` 已实现 block 抽取适配器,返回 None 即跳过。
+**实现位置**:`src/rag/ingestion/chunking.py` 的 block 主循环按上表三类路由(进入文本父子 / 进入图表独立 / 丢弃)。
+
+**关键提醒**:文本父子分块的 chunk(parent / child)不会 inline 包含 table / chart / mermaid 内容(这些走独立 chunk 路径)。在召回链路上,通过 `heading_path_id` 命中节内文本 chunk → 同节内 summary chunk 通过 `linked_chunk_id` 反查源 chunk → 拉源 chunk payload 给 LLM 消费。
 
 ### 切分主流程(4 步)
 
@@ -264,12 +288,25 @@ MinerU 输出的 `content_list_v2.json` 中所有 title 块的 `level` 字段统
 产出：为每个 Chunk 通过**单次 LLM 调用**统一生成以下字段，注入到 Metadata 中：
 - **Title**（精准小标题）
 - **Summary**（内容摘要）：同时作为摘要向量的文本来源（见 3.1.5）
-- **Tags**（主题标签）
-- **Hypothetical Questions**（假设性问题）：以患者口语视角，针对本 Chunk 内容生成 2~3 个患者可能提出的问题（见 3.1.5）。医疗场景中患者 query 多为口语症状描述，知识库内容多为临床陈述，该字段用于弥合二者之间的语义鸿沟，提升召回率。
+- **Hypothetical Questions**（假设性问题）：针对本 Chunk 内容生成 2~3 个用户可能提出的问题（临床表述与患者口语混合，见 3.1.5）。医疗场景中患者 query 多样（含口语症状描述与临床化表述），该字段用于为 chunk 提供多个语义入口，弥合 query/chunk 的表述差异，提升召回率。
+
+> **Tags 字段已废弃**(2026-05 决策):spec 钦定 Tags 用于 §3.2.3 Pre-filter,但 Pre-filter 实际由 LLM 生成的 `tags`(chunk 端)与 LLM 生成的 query 端 tags 做交集过滤,LLM 命名漂移(如 "LDL-C" vs "低密度脂蛋白")让对齐失败概率大,实施后效用低于 source_id pre-filter。`ChunkEnrichmentOutput.tags` 仍保留为可选字段(default 空列表)以兼容历史 schema,但 enrichment 阶段不再生成,chunks 表 `tags` 列保留以备未来 backfill。
 
 **工程特性**：Transform 步骤为原子化操作，每个 Chunk 独立处理，失败时仅需重试该 Chunk，不影响其他已完成的 Chunk。
 
-> 注：本节不包含图像 Caption 生成/注入——知识库摄取管道对图像类内容的处理策略见 3.1.1 节末的"关于图像内容理解的设计原则"。
+**chunk_type 区分的 enrichment 路径**:
+
+| chunk_type | enrichment 路径 |
+|---|---|
+| `parent`(父块) | 不参与本步骤(`embedding_status='skip'`,见 §3.1.2 父子索引) |
+| `child`(子块) | 走完整 enrichment(title + summary + hypothetical_questions;tags 字段保留兼容,2026-05 起 enrichment 不再生成) |
+| `table` / `chart` / `figure`(源 chunk) | 不参与本步骤(`embedding_status='bm25_only'`,只挂 BM25 sparse,见 §3.1.2) |
+| `table_summary` / `chart_summary` / `figure_summary` | **两步**:① **生成阶段**(C5 任务):text LLM 看源 chunk 的 html / markdown / mermaid + caption + heading 上下文,生成 100-300 字"医学陈述体"描述,作为本 chunk 的 `chunk_raw_text`;② **enrichment 阶段**:走完整 enrichment(同 child),输入是已生成的医学陈述文本 |
+
+**summary chunk 生成阶段的 prompt 约束**:
+- 用医学教科书段落口吻陈述源数据中的医学事实,不要描述源对象本身("图中可见"、"本表列出" 等图说/表说语)
+- 长度 100-300 字(超大表可放宽到 500 字或分段成多条 summary chunk)
+- 生成后跟所属节正文段落算 cosine 去重:> 0.85 丢弃(信息已被正文覆盖,避免冗余 chunk)
 
 
 ## 3.1.4 幂等性设计(Idempotency)
@@ -422,6 +459,22 @@ chunk_id = SHA256( source_id + ":" + heading_path_id + ":" + relative_chunk_inde
 > ```
 > 这确保同一 heading 节下只会产生一个父块 ID，且与所有子块 ID 不冲突。
 
+> **图表 chunk 约定**(C5 enrichment 落 PG 阶段使用):mineru 抽出的 `figure` / `chart` / `table` 块及其 LLM `*_summary` 不参与文本子块的 `0/1/2…` 序列,而是用 mineru manifest 中的 `(page_idx, block_idx)` 作为后缀,形成位置稳定的 `relative_chunk_index`:
+>
+> ```python
+> # 源块(承载 caption + html / image_path + footnote 等原始数据)
+> source_rel_idx  = f"{chunk_type}:p{page_idx}_b{block_idx}"
+> # LLM 单步产出的 4 字段 summary chunk
+> summary_rel_idx = f"{chunk_type}_summary:p{page_idx}_b{block_idx}"
+> ```
+>
+> 真实例子:心血管内科学第3版 p343#2 NSTE-ACS 诊断流程图 → 源块 `"figure:p343_b2"`,summary `"figure_summary:p343_b2"`。
+>
+> **碰撞安全**:这类字符串含 `:` `p` `b` 字符,与子块的纯整数 string(`"0"`、`"1"`…)和父块的 `"parent"` 字面互斥,SHA256 输入空间不重叠。同一节里若有多张图/表,每张的 `(page_idx, block_idx)` 由 mineru layout 全书唯一,亦不会互相冲突。
+>
+> **位置稳定**:`(page_idx, block_idx)` 来自 mineru 原始 layout,POC chunking 参数变化或 enrichment 重跑(prompt 升级、retry-failed)都不会改变 `chunk_id`,保证 ON CONFLICT 覆盖语义。chunk_id 锁定结构位置 vs `content_hash` 锁定文本内容,职责正交,见 §3.1.4.3。
+>
+> **跨页/多面板合并**:合并组只入库 anchor,sibling 不入库。anchor 的 `(page_idx, block_idx)` 取自 anchor 块自身;sibling 在 manifest 中标 `merge_role="sibling"`,不再独立产生 chunk。anchor 入库时灌 2 行(源块 + summary),summary 通过 `linked_chunk_id` 反指源块。
 
 
 ### 3.1.4.3 content_hash
@@ -596,8 +649,32 @@ Final_Score(d) = Σ  1 / (k + rank_i(d)),    k = 60
 
 按 RRF 融合分数降序取 Top-N（`settings.agent_limits.RETRIEVE_TOP_N`，初始值 200，**权威定义见 §9.7**；阈值调优改 `.env` 不改代码）截断，丢弃低分长尾候选。
 
-**多向量去重 (Multi-Vector Deduplication)：**
-由于 3.1.5 为每个 Chunk 生成了多条向量记录（original / summary / question），同一 Chunk 的不同向量可能同时出现在召回结果中。Top-N 截断后按 `source_chunk_id` 去重，保留同一 Chunk 下 **RRF 分数最高** 的那条记录。`original_content` 字段在所有记录中冗余存储，取哪条记录内容均相同，传给 LLM 的始终是原文。
+**多向量聚合 (Multi-Vector Aggregation):**
+由于 3.1.5 为每个 Chunk 生成了多条向量记录（original / summary / question），同一 Chunk 的不同向量可能同时出现在召回结果中。**Top-N 截断后按 `source_chunk_id` 聚合**:同一 source_chunk_id 下所有命中记录的 `1/(k + rank)` **求和**得到该 chunk 的最终 RRF 分数,**多路命中天然得分更高**(标准 RRF 跨 ranker 求和的同构扩展)。聚合产出的每条候选记录形态:
+
+```python
+{
+  "source_chunk_id": str,                # PG chunks.chunk_id
+  "rrf_score":       float,              # 各 vector 命中分数之和
+  "vector_hits": [                       # 命中清单(每命中一种 vector_type 加一条)
+    {
+      "vector_type":  str,               # original / summary / question
+      "rank":         int,               # 在原召回路中的排名
+      "matched_text": str,               # 该向量对应的源文本(取值规则见下)
+    },
+    # ...
+  ],
+}
+```
+
+**matched_text 取值规则**:
+- `vector_type='original'`:取 `chunks.chunk_raw_text`(等价 Milvus payload `original_content`)
+- `vector_type='summary'`:取 `chunks.summary`
+- `vector_type='question'`:从 Milvus vector ID(`{chunk_id}_question_N`,见 §3.1.6.2)解出 N,取 `chunks.hypothetical_questions[N]`
+
+聚合后按 `rrf_score` 降序取 Top-K,**Top-K 仍为 K 个唯一 source_chunk_id**(结构去重不变),但 `vector_hits` 副载荷保留多路命中证据,供 §3.2.3 Context 扩展按命中向量类型决定附加上下文(命中文本回带 + 反查链)。
+
+设计动机见 §3.2.3 规则 4(命中向量文本回带)。
 
 ### 3.2.3 精确过滤与重排
 
@@ -623,13 +700,39 @@ Cross-Encoder 精排**不在 `retrieve` ③ 中调用**。检索阶段（`retrie
 **默认策略**：优先保证"可用与可控"。Cross-Encoder 不可用、超时或失败时，**必须回退至 `candidate_chunks` 原序**，确保 `diagnose` ⑩ 可正常执行。
 
 ---
-**父块扩展(Parent Chunk Expansion — diagnose ⑩ 内置,非独立检索步骤)**
+**Context 扩展(Context Expansion — diagnose ⑩ 内置,非独立检索步骤)**
 
-Cross-Encoder 精排截断出 Top-K 小块后,在构建 LLM prompt 前执行父块扩展(Small-to-Big 模式,见 §3.1.2):
-- 按各小块的 `parent_chunk_id` 批量回查 PostgreSQL,取父块全文(`chunk_raw_text`)
+Cross-Encoder 精排截断出 Top-K chunk 后,在构建 LLM prompt 前对每个 Top-K chunk 按其 `chunk_type` 应用对应扩展规则,把"召回锚点"展开为"完整上下文":
+
+**规则 1:子块 → 父块**(Small-to-Big,见 §3.1.2):
+- 命中 `chunk_type='child'` 的小块,按 `parent_chunk_id` 批量回查 PostgreSQL,取父块全文(`chunk_raw_text`)
 - 若 `parent_chunk_id IS NULL`,保留小块原文兜底
-- 父块全文**仅用于当次 LLM prompt 构建**,不写回 `candidate_chunks` State 字段
-- `candidate_chunks` 全程存储小块,其余节点(`select_discriminative_symptom ⑤`、`extract_symptoms ④`)对父子索引完全无感知
 
-**父块大小**(2026-05-03 POC 验证):新切分方案下父块 median 1346 字 / p95 3563 字 / max 5218 字(~720~3700 token),约 56% 父块 > 1200 字会切多 child(其余 44% 父块 ≤ 1200 字,1 child = parent 整段)。父块全文塞入 LLM prompt 完全可控,**不需要做任何"展开整节为多 chunk"的额外扩展逻辑** — 直接用父块文本即可。
+**规则 2:summary chunk → 源 chunk → 父块**(图表 payload 跟随 + 章节上下文,见 §3.1.2):
+- 命中 `chunk_type ∈ {table_summary, chart_summary, figure_summary}` 的 summary chunk,按 `linked_chunk_id` 回查关联的源 chunk(`table` / `chart` / `figure`)
+- 把源 chunk 的完整 payload(html / markdown / mermaid + image_path)合并进 LLM context
+- **再按源 chunk 的 `parent_chunk_id` 回查所在节父块,把父块全文也合并进 context**——保证图表命中后 LLM 能看到所属章节的临床上下文(否则只看图本身可能不知道是哪个病的什么阶段)
+- 多模态 LLM 可按 image_path 加载截图作为视觉输入(可选,看运行时模型选型)
+
+**规则 3:父块 → 同节图表**(图表跟随父块,见 §3.1.2):
+- 规则 1 展开出的父块或 Top-K 直接命中的父块,按 `heading_path_id` 批量查同节内的源 chunk(`chunk_type ∈ {table, chart, figure}`)
+- 全部合并进 LLM context,**封顶 `settings.agent_limits.RETRIEVE_PARENT_FIGURE_CAP`**(默认 5,见 §9.7)
+- 超过封顶按 `relative_chunk_index` 升序保留前 K 个(确定性顺序,无优先级判断)
+- 同时对每个图表执行规则 2(若该节有对应 summary chunk,也合并进来)
+
+**规则 4:命中向量文本回带**(连接 §3.2.2 vector_hits 副载荷):
+- §3.2.2 多向量聚合产出的每条候选 chunk 携带 `vector_hits` 清单(命中的 vector_type / rank / matched_text)
+- Context 扩展时,**除规则 1~3 展开的父块/源 chunk/同节图表外,把 vector_hits 中所有 matched_text 也作为 prompt hint 附加**(去重:matched_text 已被父块原文覆盖的整体跳过)
+- 设计动机:summary / question 文本在 enrichment(§3.1.3)时由 LLM 看着完整 `heading_path` 生成,**天然带有标题路径上下文**(如"肺炎的临床表现")。父块原文可能 standalone 看不出病名(只是"三、临床表现"几段),把命中的 summary/question 文本送进 prompt 让 LLM 能看到"为什么这条 chunk 被召回"的语义线索
+- **Schema 影响**:`candidate_chunks: list[dict]` 子结构按 §3.2.2 形态,Pydantic 不强约束 list 元素 schema,新增 vector_hits 字段属 §9.2 第三类(给字段加默认值即可,反序列化老 state 时缺 vector_hits 视为 [],兼容)
+
+**去重**:四条规则展开后按 chunk_id 去重(常见 case:summary 命中触发规则 2,父块展开触发规则 3,同一图表被两条路径都拉出来;规则 4 的 matched_text 仅在不与已展开正文重叠时附加)。
+
+**作用域**:扩展产物**仅用于当次 LLM prompt 构建**,不写回 `candidate_chunks` State 字段。`candidate_chunks` 全程存储 Top-K 原 chunk,其余节点(`select_discriminative_symptom ⑤`、`extract_symptoms ④`)对扩展逻辑完全无感知。
+
+**为什么 summary 跟源 chunk 强绑定**:summary chunk 自身的 `chunk_raw_text` 只是 100-300 字医学陈述,缺了源 chunk(html/mermaid/截图)就是空命中。规则 2 保证 summary 命中即源 chunk 必到位,LLM 看到完整结构化内容。
+
+**为什么父块要带同节图表**:summary chunk 在 Top-M 抢位上可能输给正文 chunk(Reranker 偏好自然语言 chunk)。但只要同节任一正文 child 命中 → 规则 1 拉父块 → 规则 3 拉同节图表,**图表跟随正文召回的兜底路径**因此打通,不依赖 summary 进 Top-K。
+
+**父块大小**(2026-05-03 POC 验证):新切分方案下父块 median 1346 字 / p95 3563 字 / max 5218 字(~720~3700 token),约 56% 父块 > 1200 字会切多 child(其余 44% 父块 ≤ 1200 字,1 child = parent 整段)。父块全文 + 5 个图表的 payload 塞入 LLM prompt 完全可控,**不需要做任何"展开整节为多 chunk"的额外扩展逻辑** — 直接用父块文本 + 图表 payload 即可。
 

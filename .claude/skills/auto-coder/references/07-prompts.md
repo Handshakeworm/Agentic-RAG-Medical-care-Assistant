@@ -18,7 +18,7 @@
 
 | 函数 | 说明 |
 |------|------|
-| `build_chunk_enrichment_prompt` | 对单个 chunk 一次性生成 title / summary / tags / hypothetical_questions（合并为单次 LLM 调用，降低成本） |
+| `build_chunk_enrichment_prompt` | 对单个 chunk 一次性生成 title / summary / hypothetical_questions（合并为单次 LLM 调用，降低成本；tags 字段已废弃 2026-05） |
 
 > 注：知识库摄取管道不对图像类内容做 Vision LLM 理解（见 3.1.1 末"关于图像内容理解的设计原则"），因此不设 `build_image_caption_prompt`。患者检查报告的多模态解析 prompt 由 `build_exam_report_reading_prompt`（agent.py）承担。
 

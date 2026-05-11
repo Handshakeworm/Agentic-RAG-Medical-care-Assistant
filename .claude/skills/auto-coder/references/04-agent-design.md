@@ -90,7 +90,7 @@ class MedicalState(TypedDict):  # 实际为 pydantic.BaseModel,见 src/agent/sta
     sparse_queries: list[str]            # Sparse 路检索 queries：每个症状维度的别名词袋，每项一次 BM25（len = 症状维度数）
                                          # 例：["腹痛 肚子疼 胃痛 腹部疼痛", "发热 发烧 体温升高", "恶心 想吐"]
                                          # N 次 BM25 各产出候选列表 → RRF 融合（每个症状维度等权 1 票）
-    candidate_chunks: list[dict]         # 候选 chunk 池（保留向量检索原始相似度分数）
+    candidate_chunks: list[dict]         # 候选 chunk 池;每项形态 {source_chunk_id, rrf_score, vector_hits},vector_hits 见 §3.2.2 多向量聚合
     extracted_symptoms: list[dict]       # 从候选 chunk 提取的结构化症状列表；每项 {"text": str, "preferred_term": str|None, "linked": bool}（Tier 1/2 归一化后 linked=True，Tier 3 保留原文 linked=False）
     confirmed_symptoms: list[str]        # 用户确认有的症状（preferred_term）
     denied_symptoms: list[str]           # 用户确认没有的症状（preferred_term）
@@ -456,8 +456,8 @@ result = graph.invoke(initial_state, config=config)
   - **Sparse 路**：对 `sparse_queries` 中每个症状维度词袋分别做 Milvus BM25 检索（N 个维度 = N 次查询），每次返回关键词匹配候选
   - **RRF 融合**：将 Dense 结果（1 路）+ 每个 Sparse 维度结果（各 1 路）做标准 Reciprocal Rank Fusion（`score(d) = Σ 1/(k + rank_i(d))`，`k = 60`），不额外加权。单阶段 RRF 天然具备**逐 chunk 自调节权重**：某 chunk 只命中 1 个 Sparse 维度时，Sparse 有效贡献 ≈ Dense（自动 ≈1:1）；命中 m 个维度时，Sparse 有效贡献 ≈ m × Dense（自动 ≈m:1）——命中维度越多关键词证据越强，权重自动越大，无需手动设定 Dense/Sparse 权重比
   - **Top-N 截断**：按 RRF 融合分数降序，取 Top-N（`settings.agent_limits.RETRIEVE_TOP_N`，初始值 200，见 §9.7；阈值调优改 `.env` 不改代码）截断，丢弃低分长尾候选
-  - **多向量去重**：由于 3.1.5 为每个 Chunk 生成了多条向量记录（original / summary / question），同一 Chunk 的不同向量可能同时出现在截断结果中。按 `source_chunk_id` 去重，保留同一 Chunk 下 RRF 分数最高的那条记录；`original_content` 在所有记录中冗余存储，取哪条均可，传给 LLM 的始终是原文
-- **输出**: 去重后的候选 chunk 列表（含 RRF 分数），**覆盖写入** `candidate_chunks`（每轮检索结果直接替换上一轮，不做跨轮合并）
+  - **多向量聚合**:同一 source_chunk_id 下所有命中记录(original / summary / question)的 `1/(k + rank)` **求和**得到 chunk 最终 RRF 分数,多路命中得分自然更高;每条候选附 `vector_hits` 副载荷(命中向量类型 + rank + matched_text 清单),供下游 §3.2.3 Context 扩展使用。详见 §3.2.2
+- **输出**: 聚合后的候选 chunk 列表(每条形态 `{source_chunk_id, rrf_score, vector_hits}`),**覆盖写入** `candidate_chunks`(每轮检索结果直接替换上一轮,不做跨轮合并)
 - **设计理由**: `build_query` ② 每轮已融合全部累积证据（确认/否认症状、检查报告、已填维度）重写 query，新 query 的检索结果天然反映最新信息状态，无需保留历史候选；若候选仍然相关，新 query 会重新召回它
 
 ##### ④ `extract_symptoms` — 症状提取（两阶段，零 LLM）

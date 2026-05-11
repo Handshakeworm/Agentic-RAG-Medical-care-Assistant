@@ -1,47 +1,52 @@
-"""scripts/figure_enrichment_generation.py — 给 chart/figure 源块单步产出 *_summary chunk 入库 4 字段(disk-first 落 jsonl)。
+"""scripts/table_enrichment_generation.py — 给 table 源块单步产出 table_summary chunk 入库 4 字段(disk-first 落 jsonl)。
 
-按本(book_dir)读 `scripts/figure_extract_output/<book_dir>.jsonl` 的 figure manifest,
-**只处理 chart / figure 块**(table 走独立的 `table_enrichment_generation.py`,因为
+按本(book_dir)读 `scripts/figure_extract_output/<book_dir>.jsonl` 的 manifest,
+**只处理 chunk_kind="table" 的块**(chart/figure 走独立的 figure_enrichment_generation.py,
 LLM 选型 + prompt 完全不同,放一起会让两条路径相互拖累):
 
-- **chart / figure**:多模态 LLM(qwen3.5-plus)看截图(anchor 多图、standalone 单图)
-  → 4 字段单步产出
+- text LLM(deepseek-v4-pro)看 html → 4 字段单步产出
 
-产出落 `scripts/figure_enrichment_output/<book_dir>.jsonl`,每条 record:
+产出落 `scripts/table_enrichment_output/<book_dir>.jsonl`,每条 record:
     {book_dir, page_idx, block_idx, chunk_kind, status,
      medical_statement, title, summary, hypothetical_questions,
-     elapsed_s, [merge_group_id, n_images]}
+     elapsed_s}
 
-medical_statement 直接对应下游 *_summary chunk 的 chunk_raw_text;title/summary/
+medical_statement 直接对应下游 table_summary chunk 的 chunk_raw_text;title/summary/
 hypothetical_questions 对应 ChunkEnrichmentOutput 的同名字段——一次产出可直接灌库。
 
 下游 cosine 去重 + chunks 表灌库由独立任务接力,本脚本不负责。
 
-# 设计要点(对齐 enrichment.py)
+# 设计要点(对齐 figure_enrichment_generation.py)
 
 - **disk-first**:LLM 产物先落本地 jsonl,审核/重灌之间解耦;不直接写 PG
 - **断点续传**:启动时读 jsonl 已有 (page_idx, block_idx) 集合(无论 ok/failed 都 skip),
   避免重复烧 token;`--retry-failed` 标志显式重跑失败条
 - **失败跳过**(spec §9.3 低安全等级):2 次重试都失败 → 记 status="failed" 写 jsonl
-- **并发**:asyncio + Semaphore(text/vision 各自一组,vision 更稳但慢,text 高并发)
-- **配置就近**:vision(qwen3.5-plus)走 LLM_BASE_URL(DashScope 兼容口) + LLM_API_KEY
-- **孤儿丢弃**:manifest 中 heading_path=None 的(135 条 preface/ref-zone/视频资源页)直接 skip,
-  不生成 summary,后续也不入库
+- **并发**:asyncio + Semaphore;deepseek-v4-pro 文本调用比 vision 稳,16 并发已被
+  enrichment.py(22287 条 child enrichment)验证
+- **配置就近**:复用 enrichment.py 的 DEEPSEEK_BASE_URL / DEEPSEEK_API_KEY / DEEPSEEK_MODEL_NAME
+- **孤儿丢弃**:manifest 中 heading_path=None 的(table 中 ~129 条)直接 skip,不入库
+- **跨书并发**:全局共享 LLM + Semaphore + asyncio.gather 跨书 → 12+ 本同时跑共占 16 并发槽
+
+# 跨页 sibling 处理(merge_role 字段由 scripts/merge_crosspage_tables.py 注入)
+
+- **duplicate**:mineru 跨页冗余转录(sibling 内容已在 anchor 里),跳过 LLM,
+  写 status=duplicate_of_anchor 留痕
+- **standalone + merged_html_extension**:真分页同表 anchor — 拿 content + extension
+  拼接的 html 喂给 LLM(extension 已经过去重,只含 sibling 中 anchor 没有的新行)
+- **standalone**(无 extension)/ 缺 merge_role:走单表原逻辑
 
 用法:
-    python scripts/figure_enrichment_generation.py poc_chunking_诊断学_第10版            # 单本
-    python scripts/figure_enrichment_generation.py poc_chunking_诊断学_第10版 --limit 5  # 试跑前 5
-    python scripts/figure_enrichment_generation.py --all                                  # 全 12 本
-    python scripts/figure_enrichment_generation.py --all --retry-failed                  # 重跑 failed
-    python scripts/figure_enrichment_generation.py --all --kind chart                    # 只跑 chart 子集
-    python scripts/figure_enrichment_generation.py --all --anchors-only                  # 只跑多面板 anchor
+    python scripts/table_enrichment_generation.py poc_chunking_诊断学_第10版            # 单本
+    python scripts/table_enrichment_generation.py poc_chunking_诊断学_第10版 --limit 5  # 试跑前 5
+    python scripts/table_enrichment_generation.py --all                                  # 全 12 本
+    python scripts/table_enrichment_generation.py --all --retry-failed                  # 重跑 failed
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -61,39 +66,31 @@ load_dotenv(REPO_ROOT / ".env")
 
 from load_chunks_to_pg import BOOK_TO_FILENAME  # noqa: E402
 from src.agent.schemas.ingestion import FigureSummaryEnrichmentOutput  # noqa: E402
-from src.prompts.ingestion import (  # noqa: E402
-    build_figure_summary_multimodal_messages,
-)
+from src.prompts.ingestion import build_table_summary_messages  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────────────
 # 路径 / LLM 配置(就近收敛,one-off 离线任务,不进 settings.LLMSettings)
 # ─────────────────────────────────────────────────────────────────────
 
 INPUT_DIR = REPO_ROOT / "scripts" / "figure_extract_output"
-OUTPUT_DIR = REPO_ROOT / "scripts" / "figure_enrichment_output"
+OUTPUT_DIR = REPO_ROOT / "scripts" / "table_enrichment_output"
 
-# Vision LLM(chart/figure → 截图 → 4 字段)— qwen3.5-plus 原生多模态
-DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-QWEN_VISION_MODEL = "qwen3.5-plus"
+# Text LLM(table → html → 4 字段)— 复用 enrichment.py 同款 deepseek
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+DEEPSEEK_MODEL_NAME = "deepseek-v4-pro"
 
 LLM_TEMPERATURE = 0.3
-# 单步 4 字段 JSON 输出 + 保留 thinking mode 的预算:
-#   - 4 字段 JSON 纯输出:medical_statement(100-300 字)+ title(≤30)+ summary(≤250)
-#     + 2-3 questions(各 30-80 字)+ JSON syntax 损耗 = ~700-1100 token
-#   - thinking mode 推理:hard case 可能 500-2000 token(见 #22 骨科 figure 历史失败)
-#   - 给足 4096 让模型不会被截断;实际平均消耗远低于此(浪费可忽略)
+# 单步 4 字段 JSON + 可能的 thinking 推理预算(参 figure 脚本):4096 token 给足
 LLM_MAX_TOKENS = 4096
-LLM_TIMEOUT = 120.0   # 视觉 + thinking 比纯输出长,timeout 同步抬
+LLM_TIMEOUT = 90.0
 
-# 并发配置(2026-05-08 调:vision 6→12 提速一倍,实测 ~50s/call ≈ 14 RPM,
-# 远低于 DashScope 视觉模型默认 60-120 RPM 限流;429 时 with_retry 自动兜底)
-VISION_CONCURRENCY = 12      # qwen3.5-plus 多模态
+TEXT_CONCURRENCY = 16  # enrichment.py 22287 条已验证
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
-log = logging.getLogger("figure_enrichment")
+log = logging.getLogger("table_enrichment")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -110,7 +107,7 @@ def _output_path(book_dir: str) -> Path:
 
 
 def _record_key(rec: dict[str, Any]) -> tuple[int, int]:
-    """resume key:用 (page_idx, block_idx) 在书内唯一标识图块。"""
+    """resume key:用 (page_idx, block_idx) 在书内唯一标识 table 块。"""
     return (rec["page_idx"], rec["block_idx"])
 
 
@@ -149,48 +146,6 @@ async def _append_jsonl(book_dir: str, record: dict[str, Any]) -> None:
             f.write(line)
 
 
-def _purge_records(book_dir: str, keys_to_purge: set[tuple[int, int]]) -> tuple[int, int]:
-    """重跑前从 output jsonl 中物理删除指定 keys 的 status=ok 和 status=failed 旧记录。
-
-    被 --retry-footnote-only 使用:prompt 升级后,旧 ok 记录视为信息缺失版需要清掉;
-    同时旧的 failed(常见 403/超时残留)也清掉,这样 _load_processed 不会把它们算 done
-    导致 todo 漏算,新一轮 prompt + 付费 key 重跑能补回来。
-
-    sibling(status=merged_into_anchor)和 orphan(status=skip_orphan)保留——
-    它们是逻辑性 skip,不是失败,不该改变。
-
-    返回 (purged_ok, purged_failed)。
-    """
-    p = _output_path(book_dir)
-    if not p.exists() or not keys_to_purge:
-        return 0, 0
-    kept_lines: list[str] = []
-    purged_ok = 0
-    purged_failed = 0
-    with p.open("r", encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                kept_lines.append(line)
-                continue
-            key = (rec.get("page_idx"), rec.get("block_idx"))
-            status = rec.get("status")
-            if key in keys_to_purge and status in ("ok", "failed"):
-                if status == "ok":
-                    purged_ok += 1
-                else:
-                    purged_failed += 1
-                continue
-            kept_lines.append(line)
-    if purged_ok or purged_failed:
-        with p.open("w", encoding="utf-8") as f:
-            f.writelines(kept_lines)
-    return purged_ok, purged_failed
-
-
 # ─────────────────────────────────────────────────────────────────────
 # manifest 读取
 # ─────────────────────────────────────────────────────────────────────
@@ -211,16 +166,16 @@ def _load_manifest(book_dir: str) -> list[dict[str, Any]]:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# LLM client 构造
+# LLM client
 # ─────────────────────────────────────────────────────────────────────
 
 
-def _build_vision_llm() -> ChatOpenAI:
-    api_key = os.environ.get("LLM_API_KEY")
+def _build_text_llm() -> ChatOpenAI:
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
-        raise RuntimeError(".env 缺少 LLM_API_KEY(DashScope key,用于 chart/figure summary)")
-    model_name = os.environ.get("QWEN_VISION_MODEL", QWEN_VISION_MODEL)
-    base_url = os.environ.get("LLM_BASE_URL", DASHSCOPE_BASE_URL)
+        raise RuntimeError(".env 缺少 DEEPSEEK_API_KEY(用于 table summary)")
+    model_name = os.environ.get("DEEPSEEK_MODEL_NAME", DEEPSEEK_MODEL_NAME)
+    base_url = os.environ.get("DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL)
     return ChatOpenAI(
         base_url=base_url,
         api_key=api_key,
@@ -232,21 +187,8 @@ def _build_vision_llm() -> ChatOpenAI:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 单条处理
+# 输出后置校验(同 figure 脚本)
 # ─────────────────────────────────────────────────────────────────────
-
-
-def _read_image_b64(img_abs_path: str) -> tuple[str, str]:
-    """读图返回 (base64_str, mime)。jpg/png 各自识别。"""
-    p = Path(img_abs_path)
-    raw = p.read_bytes()
-    mime = "image/png" if p.suffix.lower() == ".png" else "image/jpeg"
-    return base64.b64encode(raw).decode("ascii"), mime
-
-
-def _read_images_b64(paths: list[str]) -> list[tuple[str, str]]:
-    """读多图,顺序保留(已由 merge 模块按 bbox y→x 排好)。"""
-    return [_read_image_b64(p) for p in paths]
 
 
 def _validate_output(out: FigureSummaryEnrichmentOutput) -> None:
@@ -259,7 +201,7 @@ def _validate_output(out: FigureSummaryEnrichmentOutput) -> None:
     title = (out.title or "").strip()
     if not title:
         raise RuntimeError("title is empty")
-    if len(title) > 60:  # 30 字硬上限放到 60 是安全余量
+    if len(title) > 60:
         raise RuntimeError(f"title too long ({len(title)} chars)")
     summary = (out.summary or "").strip()
     if not summary:
@@ -268,29 +210,41 @@ def _validate_output(out: FigureSummaryEnrichmentOutput) -> None:
         raise RuntimeError("hypothetical_questions is empty")
 
 
+# ─────────────────────────────────────────────────────────────────────
+# 单条处理
+# ─────────────────────────────────────────────────────────────────────
+
+
 async def _summarize_one(
-    vision_chain: Any,
+    text_chain: Any,
     rec: dict[str, Any],
     book_dir: str,
-    vision_sem: asyncio.Semaphore,
+    text_sem: asyncio.Semaphore,
 ) -> str:
-    """处理单条 manifest record(只 chart / figure;table 由 table_enrichment_generation.py 处理)。
+    """处理单条 table manifest record。详细去重语义见模块 docstring。
 
-    返回 'ok' / 'failed' / 'skip_orphan' / 'skip_sibling' / 'skip_table'。
-
-    合并语义(merge_role 由 merge_multipanel_figures.py 注入):
-      - "anchor":vision LLM 看 merged_image_abs_paths 全组截图
-      - "sibling":跳过 LLM,记 status=merged_into_anchor 落 jsonl 留痕
-      - "standalone" / 缺失:走单图原逻辑(向后兼容未跑过 merge 的 manifest)
+    返回 'ok' / 'failed' / 'skip_orphan' / 'skip_non_table' / 'skip_duplicate'。
     """
     page_idx = rec["page_idx"]
     block_idx = rec["block_idx"]
     chunk_kind = rec["chunk_kind"]
     merge_role = rec.get("merge_role")  # 未跑 merge 模块的 manifest 此字段缺失
 
-    # 防御性:即使本脚本理论上 only_kinds 已过滤掉 table,这里再兜一道
-    if chunk_kind == "table":
-        return "skip_table"
+    # 防御性:本脚本只处理 table
+    if chunk_kind != "table":
+        return "skip_non_table"
+
+    # duplicate 跳过 LLM(anchor 已包含完整表 / 拿 extension 合并跑,duplicate 不重复跑),只留痕
+    if merge_role == "duplicate":
+        await _append_jsonl(book_dir, {
+            "book_dir": book_dir,
+            "page_idx": page_idx,
+            "block_idx": block_idx,
+            "chunk_kind": chunk_kind,
+            "status": "duplicate_of_anchor",
+            "merge_group_id": rec.get("merge_group_id"),
+        })
+        return "skip_duplicate"
 
     # 孤儿(heading_path=None)不生成 summary
     if rec.get("heading_path") is None:
@@ -304,66 +258,44 @@ async def _summarize_one(
         })
         return "skip_orphan"
 
-    # sibling 跳过 LLM 调用(summary 由 anchor 统一产出),只留痕
-    if merge_role == "sibling":
+    caption = " ".join(rec.get("caption") or [])
+    footnote = " ".join(rec.get("footnote") or [])
+    sub_type = rec.get("mineru_sub_type") or ""
+    heading_path = rec["heading_path"]
+    # anchor 有 merged_html_extension 时(真分页同表),把新增行拼到 content 后给 LLM
+    content = rec.get("content") or ""
+    ext = rec.get("merged_html_extension")
+    if ext:
+        content = content + "\n" + ext
+
+    t0 = time.perf_counter()
+    try:
+        messages = build_table_summary_messages(
+            heading_path=heading_path,
+            caption=caption,
+            footnote=footnote,
+            mineru_sub_type=sub_type,
+            content=content,
+        )
+        async with text_sem:
+            result: FigureSummaryEnrichmentOutput = await text_chain.ainvoke(messages)
+
+        _validate_output(result)
+
+        elapsed = time.perf_counter() - t0
         await _append_jsonl(book_dir, {
             "book_dir": book_dir,
             "page_idx": page_idx,
             "block_idx": block_idx,
             "chunk_kind": chunk_kind,
-            "status": "merged_into_anchor",
-            "merge_group_id": rec.get("merge_group_id"),
-        })
-        return "skip_sibling"
-
-    caption = " ".join(rec.get("caption") or [])
-    footnote = " ".join(rec.get("footnote") or [])
-    sub_type = rec.get("mineru_sub_type") or ""
-    heading_path = rec["heading_path"]
-
-    t0 = time.perf_counter()
-    try:
-        # anchor 用 merged_image_abs_paths;standalone / 缺 merge_role 用单图
-        if merge_role == "anchor" and rec.get("merged_image_abs_paths"):
-            img_paths = rec["merged_image_abs_paths"]
-        else:
-            single_path = rec.get("image_abs_path")
-            if not single_path or not rec.get("image_exists"):
-                raise RuntimeError(f"image missing: {single_path}")
-            img_paths = [single_path]
-
-        images_b64 = _read_images_b64(img_paths)
-        messages = build_figure_summary_multimodal_messages(
-            heading_path=heading_path,
-            caption=caption,
-            footnote=footnote,
-            chunk_kind=chunk_kind,
-            mineru_sub_type=sub_type,
-            images_b64=images_b64,
-        )
-        async with vision_sem:
-            result: FigureSummaryEnrichmentOutput = await vision_chain.ainvoke(messages)
-
-        _validate_output(result)
-
-        elapsed = time.perf_counter() - t0
-        out_rec: dict[str, Any] = {
-            "book_dir": book_dir,
-            "page_idx": page_idx,
-            "block_idx": block_idx,
-            "chunk_kind": chunk_kind,
             "status": "ok",
-            # 4 字段 — 直接对应 *_summary chunk 入 PG 的内容字段
+            # 4 字段 — 直接对应 table_summary chunk 入 PG 的内容字段
             "medical_statement": result.medical_statement,
             "title": result.title,
             "summary": result.summary,
             "hypothetical_questions": result.hypothetical_questions,
             "elapsed_s": round(elapsed, 2),
-        }
-        if merge_role == "anchor":
-            out_rec["merge_group_id"] = rec.get("merge_group_id")
-            out_rec["n_images"] = len(rec.get("merged_image_abs_paths") or [])
-        await _append_jsonl(book_dir, out_rec)
+        })
         return "ok"
 
     except Exception as e:
@@ -379,7 +311,7 @@ async def _summarize_one(
             "error": f"{err_kind}: {err_msg}",
             "elapsed_s": round(elapsed, 2),
         })
-        log.warning(f"  p{page_idx}#{block_idx} {chunk_kind}  FAILED  ({err_kind})")
+        log.warning(f"  p{page_idx}#{block_idx} table  FAILED  ({err_kind})")
         return "failed"
 
 
@@ -390,56 +322,27 @@ async def _summarize_one(
 
 async def summarize_book(
     book_dir: str,
-    vision_chain: Any,
-    vision_sem: asyncio.Semaphore,
+    text_chain: Any,
+    text_sem: asyncio.Semaphore,
     limit: int | None = None,
     retry_failed: bool = False,
-    retry_footnote_only: bool = False,
-    only_kinds: set[str] | None = None,
-    anchors_only: bool = False,
 ) -> dict[str, int]:
-    """注:vision_chain / vision_sem 由 _amain 全局构建,跨书共享。
-
-    早先版本是每本书内部各自 build_llm + Semaphore,在 books 顺序 await 时变成
-    "12 本 × 各自 N 并发"的串行,实际吞吐严重退化(--limit 2 时每本只用 2 个槽)。
-    现改成全局共享 + 跨书 asyncio.gather,~24 条一次性吃满 12 并发。
-    """
+    """注:text_chain / text_sem 由 _amain 全局构建,跨书共享。"""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     log.info(f"=== {book_dir} ===")
 
     all_records = _load_manifest(book_dir)
     log.info(f"  manifest 共 {len(all_records)} 条")
 
-    # 本脚本只处理 chart/figure(table 走 table_enrichment_generation.py)
-    if only_kinds is None:
-        only_kinds = {"chart", "figure"}
-    else:
-        only_kinds = only_kinds & {"chart", "figure"}
-    all_records = [r for r in all_records if r["chunk_kind"] in only_kinds]
-    log.info(f"  --kind {','.join(sorted(only_kinds))} 过滤后 {len(all_records)} 条")
+    # 只处理 table
+    all_records = [r for r in all_records if r["chunk_kind"] == "table"]
+    log.info(f"  table 过滤后 {len(all_records)} 条")
 
-    if anchors_only:
-        all_records = [r for r in all_records if r.get("merge_role") == "anchor"]
-        log.info(f"  --anchors-only 过滤后 {len(all_records)} 条")
-
-    # 孤儿(heading_path=None,~3.4% 全集)前置过滤,避免占 --limit 配额
+    # 孤儿(heading_path=None)前置过滤
     n_orphan_excluded = sum(1 for r in all_records if r.get("heading_path") is None)
     all_records = [r for r in all_records if r.get("heading_path") is not None]
     if n_orphan_excluded:
         log.info(f"  孤儿前置过滤:跳过 {n_orphan_excluded} 条(不入库,不调 LLM)")
-
-    # --retry-footnote-only:把 manifest footnote 非空的 ok+failed 记录从 jsonl 物理删除,
-    # 后续 _load_processed 自然不再视为 done,会被列入 todo 重跑(用新 prompt + footnote)
-    if retry_footnote_only:
-        keys_with_footnote = {
-            _record_key(r) for r in all_records
-            if (r.get("footnote") or [])
-        }
-        purged_ok, purged_failed = _purge_records(book_dir, keys_with_footnote)
-        log.info(
-            f"  --retry-footnote-only:从 jsonl 删除 {purged_ok} 条旧 ok + "
-            f"{purged_failed} 条旧 failed 记录(footnote 非空,等待重跑)"
-        )
 
     done = _load_processed(book_dir, include_failed=not retry_failed)
     todo = [r for r in all_records if _record_key(r) not in done]
@@ -449,24 +352,22 @@ async def summarize_book(
 
     if not todo:
         log.info("  无待处理,跳过")
-        return {"total": len(all_records), "done_before": len(done),
-                "ok": 0, "failed": 0, "skip_orphan": 0, "skip_sibling": 0}
+        return {"total": len(all_records), "done_before": len(done), "ok": 0, "failed": 0}
 
     t0 = time.perf_counter()
     results = await asyncio.gather(*(
-        _summarize_one(vision_chain, r, book_dir, vision_sem)
-        for r in todo
+        _summarize_one(text_chain, r, book_dir, text_sem) for r in todo
     ))
     elapsed = time.perf_counter() - t0
 
     n_ok = results.count("ok")
     n_fail = results.count("failed")
     n_orphan = results.count("skip_orphan")
-    n_sibling = results.count("skip_sibling")
+    n_dup = results.count("skip_duplicate")
     rate = len(todo) / elapsed if elapsed > 0 else 0
     log.info(
         f"  本次完成 {len(todo)} 条:ok={n_ok}  failed={n_fail}  "
-        f"skip_orphan={n_orphan}  skip_sibling={n_sibling}  "
+        f"skip_orphan={n_orphan}  skip_duplicate={n_dup}  "
         f"耗时 {elapsed:.1f}s  ({rate:.1f} chunk/s)"
     )
 
@@ -476,7 +377,7 @@ async def summarize_book(
         "ok": n_ok,
         "failed": n_fail,
         "skip_orphan": n_orphan,
-        "skip_sibling": n_sibling,
+        "skip_duplicate": n_dup,
     }
 
 
@@ -491,33 +392,7 @@ def _parse_args():
     p.add_argument("--all", action="store_true", help="顺序跑 BOOK_TO_FILENAME 全 12 本")
     p.add_argument("--limit", type=int, default=None, help="限制本次最多处理 N 条(试跑用)")
     p.add_argument("--retry-failed", action="store_true", help="重试 jsonl 中 status=failed 的条")
-    p.add_argument(
-        "--retry-footnote-only",
-        action="store_true",
-        help="重跑 manifest 中 footnote 非空的 ok 记录(prompt 升级时使用,会先物理删除旧 ok 记录)",
-    )
-    p.add_argument(
-        "--kind",
-        default=None,
-        help="只处理指定类型(本脚本只支持 chart / figure;table 走 table_enrichment_generation.py)",
-    )
-    p.add_argument(
-        "--anchors-only",
-        action="store_true",
-        help="只处理 merge_role=anchor 的多面板组(便于审多图合并产出);未跑过 merge 模块的 manifest 此 flag 无效",
-    )
     return p.parse_args()
-
-
-def _parse_kinds(kind_arg: str | None) -> set[str] | None:
-    if not kind_arg:
-        return None
-    valid = {"chart", "figure"}  # 本脚本不收 table
-    kinds = {k.strip() for k in kind_arg.split(",") if k.strip()}
-    bad = kinds - valid
-    if bad:
-        sys.exit(f"--kind 含未知/不支持类型 {bad};本脚本只支持 {valid}(table 走 table_enrichment_generation.py)")
-    return kinds
 
 
 async def _amain():
@@ -525,49 +400,43 @@ async def _amain():
     if args.all and args.book_dir:
         sys.exit("--all 与 book_dir 不能同时指定")
     if not args.all and not args.book_dir:
-        sys.exit("用法:python scripts/figure_enrichment_generation.py <book_dir> [--limit N] [--kind chart|figure] | --all")
+        sys.exit("用法:python scripts/table_enrichment_generation.py <book_dir> [--limit N] | --all")
 
-    only_kinds = _parse_kinds(args.kind)
     targets = list(BOOK_TO_FILENAME.keys()) if args.all else [args.book_dir]
     valid_targets = [b for b in targets if b in BOOK_TO_FILENAME]
     for b in targets:
         if b not in BOOK_TO_FILENAME:
             log.error(f"未知 book_dir: {b}(不在 BOOK_TO_FILENAME 映射,跳过)")
 
-    # 全局共享 vision LLM + chain + Semaphore(跨书共用,跨书 gather 按 12 限流)
-    vision_llm = _build_vision_llm()
-    # with_structured_output 不指定 method:langchain 默认对 ChatOpenAI 走 function_calling
-    # (思考链走 content 字段,JSON 走 tool_calls 字段,天然解耦),避开 json_mode 服务端
-    # 约束解码导致 thinking 与 JSON 互踩的失败模式(实测 1 条 神经内科 p152#0 figure 因
-    # json_mode + thinking 冲突返回空 content)
-    vision_chain = vision_llm.with_structured_output(
-        FigureSummaryEnrichmentOutput
+    text_llm = _build_text_llm()
+    # method="json_mode":DeepSeek 不支持 json_schema(2026-05 实测 400 BadRequest
+    # "This response_format type is unavailable now"),enrichment.py 也走 json_mode。
+    # 跟 figure 脚本(qwen)默认 function_calling 不同,deepseek 端只能用 json_mode。
+    text_chain = text_llm.with_structured_output(
+        FigureSummaryEnrichmentOutput,
+        method="json_mode",
     ).with_retry(stop_after_attempt=2)
-    vision_sem = asyncio.Semaphore(VISION_CONCURRENCY)
+    text_sem = asyncio.Semaphore(TEXT_CONCURRENCY)
 
-    # 跨书并发跑(每本书内 asyncio.gather 也并发,共享 sem 总限流)
     grand_t0 = time.perf_counter()
     book_results = await asyncio.gather(*(
         summarize_book(
             book,
-            vision_chain=vision_chain,
-            vision_sem=vision_sem,
+            text_chain=text_chain,
+            text_sem=text_sem,
             limit=args.limit,
             retry_failed=args.retry_failed,
-            retry_footnote_only=args.retry_footnote_only,
-            only_kinds=only_kinds,
-            anchors_only=args.anchors_only,
         ) for book in valid_targets
     ))
     grand_elapsed = time.perf_counter() - grand_t0
 
-    grand = {"ok": 0, "failed": 0, "skip_orphan": 0, "skip_sibling": 0}
+    grand = {"ok": 0, "failed": 0, "skip_orphan": 0, "skip_duplicate": 0}
     for s in book_results:
         for k in grand:
             grand[k] += s.get(k, 0)
     log.info(
         f"=== 汇总 ok={grand['ok']}  failed={grand['failed']}  "
-        f"skip_orphan={grand['skip_orphan']}  skip_sibling={grand['skip_sibling']}  "
+        f"skip_orphan={grand['skip_orphan']}  skip_duplicate={grand['skip_duplicate']}  "
         f"全程 {grand_elapsed:.1f}s ==="
     )
 

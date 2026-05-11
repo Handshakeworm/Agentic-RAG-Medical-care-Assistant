@@ -168,7 +168,7 @@ Agentic-RAG-Medical-care-Assistant/
 │   │   │   ├── __init__.py
 │   │   │   ├── mineru_loader.py        # 3.1.1 MinerU 产物加载（读取 markdown + content_list）
 │   │   │   ├── chunking.py             # 3.1.2 父子分块：目录权威清单 + 节内三遍切【】+(一)+1. + size 驱动子块切
-│   │   │   ├── enrichment.py           # 3.1.3 LLM 增强（title/summary/tags/questions）
+│   │   │   ├── enrichment.py           # 3.1.3 LLM 增强（title/summary/questions；tags 已废弃 2026-05）
 │   │   │   ├── idempotency.py          # 3.1.4 幂等性：source_id / heading_path_id / chunk_id（含父块 "parent" 约定）/ content_hash
 │   │   │   ├── embedding.py            # 3.1.5 多向量 Embedding（Dense: Qwen3-Embedding-8B, Sparse: Milvus BM25）
 │   │   │   ├── storage.py              # 3.1.6 写入 PostgreSQL + Milvus（含僵尸清理）
@@ -179,7 +179,7 @@ Agentic-RAG-Medical-care-Assistant/
 │   │   │   ├── query_processing.py     # 3.2.1 查询预处理（指代消歧、关键词提取、术语扩展、多角度改写）
 │   │   │   ├── sparse_retriever.py     # 3.2.2 Sparse Route（Milvus BM25 全文检索）
 │   │   │   ├── dense_retriever.py      # 3.2.2 Dense Route（单次 ANN）
-│   │   │   ├── fusion.py               # 3.2.2 单阶段多路 RRF 融合 + 多向量去重
+│   │   │   ├── fusion.py               # 3.2.2 单阶段多路 RRF 融合 + 多向量聚合
 │   │   │   └── reranker.py             # 3.2.3 Cross-Encoder 精排（diagnose ⑩ 前置截断，非检索阶段调用 / 回退策略）
 │   │   │
 │   │   └── context/                    # Agent 上下文管理（4.2）
@@ -212,7 +212,7 @@ Agentic-RAG-Medical-care-Assistant/
 │   │
 │   ├── prompts/                       # LLM Prompt 模板
 │   │   ├── __init__.py
-│   │   ├── ingestion.py               # 数据摄取增强 Prompts（title/summary/tags/hypothetical_questions）
+│   │   ├── ingestion.py               # 数据摄取增强 Prompts（title/summary/hypothetical_questions；tags 已废弃 2026-05）
 │   │   ├── agent.py                   # Agent 节点 Prompts（病史采集、Query 构建、追问、诊断、安全门控、建议生成）
 │   │   └── evaluation.py              # LLM Judge 评估 Prompts
 │   │
