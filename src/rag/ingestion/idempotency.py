@@ -107,9 +107,25 @@ def compute_parent_chunk_id(source_id: str, heading_path_id: str) -> str:
 
 
 def compute_content_hash(chunk_text: str) -> str:
-    """chunk 原文 → SHA-256 全 hex(spec §3.1.4.3)。
+    """child / parent chunk_text → SHA-256 全 hex(spec §3.1.4.3)。
 
-    与 chunk_id 分离:chunk_id 锁定结构位置,content_hash 锁定文本内容。
-    用于 C5 embedding 阶段的增量判断:hash 相同则跳过向量重算。
+    child / parent 只有一路文本来源(chunk_raw_text),直接 hash 即可。
+    table / figure 行因两路来源(chunk_raw_text 走 BM25 + medical_statement 走 dense)
+    用 `compute_media_content_hash` 拼起来哈希,见下。
     """
     return hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
+
+
+def compute_media_content_hash(chunk_raw_text: str, medical_statement: str) -> str:
+    """table / figure 行的 content_hash(spec §3.1.4.3 B 方案)。
+
+    两路文本来源(chunk_raw_text 是 BM25 输入、medical_statement 是 dense original 输入)
+    任一变化都要触发重新 embed,所以拼起来一起 hash:
+
+        SHA256( chunk_raw_text + "\\n" + medical_statement )
+
+    分隔符 "\\n" 避免边界混淆(如 `"a" + "b\\nc"` vs `"a\\nb" + "c"`)。
+    """
+    return hashlib.sha256(
+        (chunk_raw_text + "\n" + medical_statement).encode("utf-8")
+    ).hexdigest()

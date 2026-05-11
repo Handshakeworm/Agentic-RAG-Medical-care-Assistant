@@ -156,17 +156,15 @@ def test_partial_indexes_present_for_status_and_parent(fresh_source_id) -> None:
             assert expected in idx_names, f"缺索引 {expected}"
 
 
-def test_tags_and_hypothetical_questions_array_roundtrip(fresh_source_id) -> None:
+def test_hypothetical_questions_array_roundtrip(fresh_source_id) -> None:
     """TEXT[] 字段应能写入/读出 Python list[str]。"""
     from src.db.postgres.connection import session_scope
     from src.db.postgres.models import Chunk, bulk_upsert_chunks
 
     parent = _make_parent(fresh_source_id, "ch_arr")
-    parent["tags"] = ["digestive", "symptom", "common"]
     parent["hypothetical_questions"] = ["肚子疼怎么办?", "腹痛是什么原因?"]
     bulk_upsert_chunks([parent])
 
     with session_scope() as s:
         row = s.get(Chunk, parent["chunk_id"])
-        assert row.tags == ["digestive", "symptom", "common"]
         assert row.hypothetical_questions == ["肚子疼怎么办?", "腹痛是什么原因?"]

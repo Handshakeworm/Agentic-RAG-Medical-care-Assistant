@@ -78,7 +78,6 @@ def test_upsert_and_dense_search_roundtrip(temp_docs_collection) -> None:
         "text_for_bm25": "腹痛是消化系统疾病常见症状",
         "original_content": "腹痛是消化系统疾病常见症状,可由胃炎、阑尾炎等多种原因引起",
         "source_id": "test_source_001",
-        "tags": ["digestive", "symptom"],
     }
     n = upsert_chunks([record])
     assert n == 1
@@ -89,7 +88,6 @@ def test_upsert_and_dense_search_roundtrip(temp_docs_collection) -> None:
     assert results[0]["id"] == "test_chunk_001"
     assert results[0]["score"] > 0.99  # COSINE 自相似 ≈ 1.0
     assert results[0]["original_content"].startswith("腹痛")
-    assert results[0]["tags"] == ["digestive", "symptom"]
 
 
 def test_bm25_full_text_search_finds_keyword(temp_docs_collection) -> None:
@@ -111,7 +109,6 @@ def test_bm25_full_text_search_finds_keyword(temp_docs_collection) -> None:
             "text_for_bm25": text,
             "original_content": text,
             "source_id": "bm25_test_source",
-            "tags": [],
         }
         for i, text in enumerate([
             "急性胆囊炎以右上腹剧烈疼痛为典型表现",
@@ -150,7 +147,6 @@ def test_summary_record_has_empty_text_for_bm25(temp_docs_collection) -> None:
         "text_for_bm25": "",  # 关键:空串,不参与 BM25
         "original_content": "本节讲述心律失常的诊断流程",
         "source_id": "test_source_002",
-        "tags": [],
     }
     n = upsert_chunks([summary_record])
     assert n == 1

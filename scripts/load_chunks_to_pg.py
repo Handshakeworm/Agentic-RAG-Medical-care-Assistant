@@ -10,12 +10,13 @@ DEV_SPEC §2.4.2 的 19 列 chunks schema 组装,并通过 `bulk_upsert_chunks`
 - heading_path_id     SHA256(join(":", [hash(normalize(H_i))]))
                       heading_path 按 " > " split 拆回各级标题序列
 - relative_chunk_index 子块: "0/1/2..."(同 parent 内递增);父块: "parent"
-- chunk_type           parent / child(本批仅文本块,无 table/chart)
+- chunk_type           parent / child(本批仅文本块,无 table/figure)
 - chunk_raw_text       POC 输出的 text 字段(blocks 用 "\n\n" 拼接)
-- content_hash         SHA256(chunk_raw_text)
+- content_hash         SHA256(chunk_raw_text);child / parent 公式见 §3.1.4.3
 - embedding_status     父块: "skip";子块: "pending"
-- linked_chunk_id / image_path / sub_type / title / summary / tags /
-  hypothetical_questions:本批一律 NULL(表/图/enrichment 后续任务填充)
+- image_path / sub_type / medical_statement / title / summary /
+  hypothetical_questions:本批一律 NULL(图表与 enrichment 由 load_media_chunks_to_pg.py
+  与 load_enrichment_to_pg.py 后续任务填充)
 
 幂等性:重跑同本(POC 切分稳定 → chunk_id 稳定)→ ON CONFLICT 覆盖。
 NOTE 本脚本**不**做僵尸清理(spec §3.1.4.3 旧集合 - 新集合 删除),首次灌入
@@ -108,14 +109,13 @@ def build_records_for_book(book_dir: str) -> tuple[list[dict[str, Any]], dict[st
             "relative_chunk_index": "parent",
             "parent_chunk_id": None,
             "chunk_type": "parent",
-            "linked_chunk_id": None,
             "image_path": None,
             "sub_type": None,
             "chunk_raw_text": p["text"],
+            "medical_statement": None,
             "content_hash": compute_content_hash(p["text"]),
             "title": None,
             "summary": None,
-            "tags": None,
             "hypothetical_questions": None,
             "embedding_status": "skip",
         })
@@ -136,14 +136,13 @@ def build_records_for_book(book_dir: str) -> tuple[list[dict[str, Any]], dict[st
                 "relative_chunk_index": rel_idx,
                 "parent_chunk_id": parent_cid,
                 "chunk_type": "child",
-                "linked_chunk_id": None,
                 "image_path": None,
                 "sub_type": None,
                 "chunk_raw_text": c["text"],
+                "medical_statement": None,
                 "content_hash": compute_content_hash(c["text"]),
                 "title": None,
                 "summary": None,
-                "tags": None,
                 "hypothetical_questions": None,
                 "embedding_status": "pending",
             })

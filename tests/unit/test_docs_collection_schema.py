@@ -9,15 +9,15 @@ from __future__ import annotations
 from pymilvus import DataType, FunctionType
 
 
-def test_docs_collection_has_9_fields() -> None:
-    """spec §2.4.1 列了 8 业务字段;pymilvus 2.5 BM25 实现额外多 1 个 SPARSE_FLOAT_VECTOR 字段。"""
+def test_docs_collection_has_8_fields() -> None:
+    """spec §2.4.1 列了 7 业务字段;pymilvus 2.5 BM25 实现额外多 1 个 SPARSE_FLOAT_VECTOR 字段。"""
     from config.milvus_schema import DOCS_FIELDS
 
-    assert len(DOCS_FIELDS) == 9
+    assert len(DOCS_FIELDS) == 8
     field_names = {f.name for f in DOCS_FIELDS}
     expected = {
         "id", "source_chunk_id", "vector_type", "dense_vector",
-        "text_for_bm25", "bm25_sparse", "original_content", "source_id", "tags",
+        "text_for_bm25", "bm25_sparse", "original_content", "source_id",
     }
     assert field_names == expected
 
@@ -99,11 +99,3 @@ def test_scalar_indexes_cover_filter_fields() -> None:
         assert idx["index_params"]["index_type"] == "INVERTED"
 
 
-def test_tags_is_array_of_varchar() -> None:
-    """tags 必须是 ARRAY[VARCHAR],容量 ≥ 20(LLM 增强阶段最多塞 20 个标签)。"""
-    from config.milvus_schema import DOCS_FIELDS
-
-    tags = next(f for f in DOCS_FIELDS if f.name == "tags")
-    assert tags.dtype == DataType.ARRAY
-    assert tags.element_type == DataType.VARCHAR
-    assert tags.params["max_capacity"] >= 20

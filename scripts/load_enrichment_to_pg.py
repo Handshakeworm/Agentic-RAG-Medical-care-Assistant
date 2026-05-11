@@ -2,7 +2,8 @@
 
 `enrichment.py` 的 LLM 产物落 `scripts/enrichment_output/<book_dir>.jsonl`,
 本脚本扫这些 jsonl,把 status='ok' 的条按 chunk_id 批量 UPDATE 到
-`chunks` 表的 4 个 enrichment 字段(title / summary / tags / hypothetical_questions)。
+`chunks` 表的 3 个 enrichment 字段(title / summary / hypothetical_questions)。
+注:历史 jsonl 含 `tags` 字段(2026-05 废弃),本脚本忽略不读不写。
 
 幂等:UPDATE 按 chunk_id 主键定位,重灌覆盖原值。status='failed' 的跳过(留 NULL)。
 
@@ -55,21 +56,20 @@ def _read_jsonl(p: Path) -> tuple[list[dict[str, Any]], int, int]:
 
 
 def _bulk_update(records: list[dict[str, Any]]) -> int:
-    """按 chunk_id 批量 UPDATE 4 字段。返回写入条数。"""
+    """按 chunk_id 批量 UPDATE 3 字段。返回写入条数。"""
     if not records:
         return 0
     sql = text(
         "UPDATE chunks SET "
-        "  title=:title, summary=:summary, tags=:tags, "
+        "  title=:title, summary=:summary, "
         "  hypothetical_questions=:hq, updated_at=now() "
         "WHERE chunk_id=:chunk_id"
-    ).bindparams(bindparam("tags"), bindparam("hq"))
+    ).bindparams(bindparam("hq"))
     payload = [
         {
             "chunk_id": r["chunk_id"],
             "title": r["title"],
             "summary": r["summary"],
-            "tags": r["tags"],
             "hq": r["hypothetical_questions"],
         }
         for r in records

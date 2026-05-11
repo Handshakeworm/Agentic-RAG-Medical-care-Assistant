@@ -35,7 +35,6 @@ PATCH_HEADING_PATH_OVERRIDES)。本脚本同样不改 POC。
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 from pathlib import Path
@@ -47,6 +46,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from derive_chunks_for_pg import _load_poc, derive_for_book  # noqa: E402
 from load_chunks_to_pg import BOOK_TO_FILENAME  # noqa: E402
+from src.rag.ingestion.idempotency import compute_heading_path_id  # noqa: E402
 
 OUT = REPO_ROOT / "scripts" / "figure_extract_output"
 
@@ -183,7 +183,11 @@ def assign_figure_heading_paths(book_dir: str, dry_run: bool = False) -> dict[st
 
         hp = parent_idx_to_hp[match["parent_idx"]]
         r["heading_path"] = hp
-        r["heading_path_id"] = hashlib.sha256(hp.encode("utf-8")).hexdigest()
+        # spec §3.1.4.2 公式:对每级标题先 hash 再用 ":" 拼接后整体 hash;
+        # **不是** 直接 SHA256(整个 heading_path),那是早期 bug,曾让 load 阶段
+        # parent_chunk_id 错位触发 FK 报错(2026-05-12 修)
+        titles = [t.strip() for t in hp.split(" > ") if t.strip()]
+        r["heading_path_id"] = compute_heading_path_id(titles)
         n_assigned += 1
         if len(samples_assigned) < 6:
             samples_assigned.append(r)

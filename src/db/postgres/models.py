@@ -135,35 +135,33 @@ class Chunk(Base):
     )
     heading_path_id: Mapped[str] = mapped_column(Text, nullable=False)
     heading_path: Mapped[str] = mapped_column(Text, nullable=False)
-    # spec §3.1.4.2:子块用 "0/1/2...",特殊块用约定字符串("parent" / "table_summary:N" 等)
+    # spec §3.1.4.2:子块用 "0/1/2...",特殊块用约定字符串("parent" / "table:p43_b3" / "figure:p63_b7")
     relative_chunk_index: Mapped[str] = mapped_column(Text, nullable=False)
     parent_chunk_id: Mapped[str | None] = mapped_column(
         Text, ForeignKey("chunks.chunk_id"), nullable=True
     )
-    # spec §2.4.2:parent / child / table / table_summary / chart / chart_summary / figure / figure_summary
+    # spec §2.4.2:parent / child / table / figure(figure 涵盖原 mineru chart + flowchart)
     chunk_type: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default="child"
     )
-    # summary chunk 反指源 chunk(table_summary→table 等);非 summary chunk 为 NULL
-    linked_chunk_id: Mapped[str | None] = mapped_column(
-        Text, ForeignKey("chunks.chunk_id"), nullable=True
-    )
-    # 图表截图相对路径(table/chart/figure chunk 用);非图表 chunk 为 NULL
+    # 图表截图相对路径(table / figure chunk 用);非图表 chunk 为 NULL
     image_path: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # mineru sub_type(figure chunk 用,如 'flowchart');非 image 来源 chunk 为 NULL
+    # mineru sub_type(figure chunk 用,记录 'flowchart' 或原 chart 子类 'line'/'bar')
     sub_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     chunk_raw_text: Mapped[str] = mapped_column(Text, nullable=False)
+    # table / figure 专用:LLM 100-300 字医学陈述,dense `original` 向量来源(替代 chunk_raw_text)
+    # spec §3.1.2 / §3.1.5;child / parent 此列为 NULL
+    medical_statement: Mapped[str | None] = mapped_column(Text, nullable=True)
     content_hash: Mapped[str] = mapped_column(Text, nullable=False)
 
     # LLM 增强字段(C4 enrichment 阶段填充,初次 upsert 可全空)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-    tags: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     hypothetical_questions: Mapped[list[str] | None] = mapped_column(
         ARRAY(Text), nullable=True
     )
 
-    # 运维状态:pending / done / failed / skip / bm25_only(spec §2.4.2)
+    # 运维状态:pending / done / failed / skip(spec §2.4.2)
     embedding_status: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default="pending"
     )
@@ -190,14 +188,13 @@ def _chunk_upsert_stmt(records: list[dict]):
             "relative_chunk_index": stmt.excluded.relative_chunk_index,
             "parent_chunk_id": stmt.excluded.parent_chunk_id,
             "chunk_type": stmt.excluded.chunk_type,
-            "linked_chunk_id": stmt.excluded.linked_chunk_id,
             "image_path": stmt.excluded.image_path,
             "sub_type": stmt.excluded.sub_type,
             "chunk_raw_text": stmt.excluded.chunk_raw_text,
+            "medical_statement": stmt.excluded.medical_statement,
             "content_hash": stmt.excluded.content_hash,
             "title": stmt.excluded.title,
             "summary": stmt.excluded.summary,
-            "tags": stmt.excluded.tags,
             "hypothetical_questions": stmt.excluded.hypothetical_questions,
             "embedding_status": stmt.excluded.embedding_status,
             "updated_at": func.now(),
@@ -205,7 +202,7 @@ def _chunk_upsert_stmt(records: list[dict]):
     )
 
 
-# PG 单条 prepared statement 参数 ≤ 65535(uint16)。chunks 表 17 列 × N records,
+# PG 单条 prepared statement 参数 ≤ 65535(uint16)。chunks 表 15 列 × N records,
 # 安全阈值留 50% 余量 → 3000 records/批。
 _CHUNK_INSERT_BATCH_SIZE = 3000
 
@@ -219,8 +216,8 @@ def bulk_upsert_chunks(records: list[dict], batch_size: int = _CHUNK_INSERT_BATC
 
     每条 record 必含 9 个核心字段(chunk_id / source_id / heading_path_id /
     heading_path / relative_chunk_index / parent_chunk_id / chunk_type /
-    chunk_raw_text / content_hash);LLM 增强字段(title/summary/tags/
-    hypothetical_questions)、图表字段(linked_chunk_id/image_path/sub_type)
+    chunk_raw_text / content_hash);LLM 增强字段(title / summary /
+    hypothetical_questions / medical_statement)、图表字段(image_path / sub_type)
     与 embedding_status 可缺省,DB 默认值或 NULL 兜底。
     """
     if not records:

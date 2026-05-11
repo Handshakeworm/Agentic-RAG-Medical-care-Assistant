@@ -56,8 +56,8 @@ def ensure_docs_collection(drop_existing: bool = False) -> Collection:
 def upsert_chunks(records: list[dict]) -> int:
     """幂等批量写入。
 
-    records 每项需含 8 业务字段:`id`、`source_chunk_id`、`vector_type`、
-    `dense_vector`、`text_for_bm25`、`original_content`、`source_id`、`tags`。
+    records 每项需含 7 业务字段:`id`、`source_chunk_id`、`vector_type`、
+    `dense_vector`、`text_for_bm25`、`original_content`、`source_id`。
     `bm25_sparse` 由 BM25 Function 自动派生,**不要手动传入**。
 
     summary / question 记录的 `text_for_bm25` 必须是空串(不参与 BM25,见 §2.4.1)。
@@ -97,7 +97,7 @@ def search_dense(
         param={"metric_type": "COSINE", "params": {"ef": 64}},
         limit=top_k,
         expr=expr,
-        output_fields=["id", "source_chunk_id", "vector_type", "original_content", "source_id", "tags"],
+        output_fields=["id", "source_chunk_id", "vector_type", "original_content", "source_id"],
     )[0]
 
     return [
@@ -107,7 +107,6 @@ def search_dense(
             "vector_type": hit.entity.get("vector_type"),
             "original_content": hit.entity.get("original_content"),
             "source_id": hit.entity.get("source_id"),
-            "tags": hit.entity.get("tags"),
             "score": hit.score,
         }
         for hit in raw
@@ -138,7 +137,7 @@ def search_sparse_bm25(
         param={"metric_type": "BM25", "params": {}},
         limit=top_k,
         expr=expr,
-        output_fields=["id", "source_chunk_id", "vector_type", "original_content", "source_id", "tags"],
+        output_fields=["id", "source_chunk_id", "vector_type", "original_content", "source_id"],
     )[0]
 
     return [
@@ -148,7 +147,6 @@ def search_sparse_bm25(
             "vector_type": hit.entity.get("vector_type"),
             "original_content": hit.entity.get("original_content"),
             "source_id": hit.entity.get("source_id"),
-            "tags": hit.entity.get("tags"),
             "score": hit.score,
         }
         for hit in raw

@@ -1,7 +1,7 @@
 """scripts/enrichment.py — §3.1.3 chunk LLM 增强(disk-first 落 jsonl)。
 
 按本(book_dir)从 PG `chunks` 表拉所有 chunk_type='child' 的子块,
-为每条调 DeepSeek-V4-Pro 生成 ChunkEnrichmentOutput(title / summary / tags /
+为每条调 DeepSeek-V4-Pro 生成 ChunkEnrichmentOutput(title / summary /
 hypothetical_questions),结果 append 写入 `scripts/enrichment_output/<book_dir>.jsonl`。
 
 设计要点:
@@ -186,7 +186,6 @@ async def _enrich_one(
                 "status": "ok",
                 "title": result.title,
                 "summary": result.summary,
-                "tags": result.tags,  # 已废弃字段,2026-05;LLM 不再生成,这里 default [] 兼容历史 schema
                 "hypothetical_questions": result.hypothetical_questions,
                 "elapsed_s": round(elapsed, 2),
             })

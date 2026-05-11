@@ -5,7 +5,7 @@ preferred_term 也是 alias 文本)→ upsert 到 Milvus terms_collection。
 
 设计:
 - concept_id = ICD 编码(权威主键)
-- 同 preferred_term 跨次或跨源(后续 CHIP)灌库会归到同一 concept_id
+- 同 preferred_term 跨次或跨源灌库会归到同一 concept_id
 - category 按 ICD 段粗分:R 段 → symptom,其余 → disease
   (Z/V/W/X/Y 等小众段先归 disease,后期可补细分)
 

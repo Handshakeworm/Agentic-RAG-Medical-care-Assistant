@@ -161,14 +161,6 @@ DOCS_FIELDS = [
         max_length=128,
         description="Pre-filter 字段:按来源文档过滤(对应 §2.4.2 sources 表)",
     ),
-    FieldSchema(
-        name="tags",
-        dtype=DataType.ARRAY,
-        element_type=DataType.VARCHAR,
-        max_capacity=20,
-        max_length=64,
-        description="Pre-filter 字段:LLM enrichment 阶段填充的主题标签",
-    ),
 ]
 
 # BM25 Function:把 text_for_bm25 字段自动派生成 bm25_sparse 稀疏向量
