@@ -30,7 +30,7 @@ class AgentLimitsSettings(BaseSettings):
     RETRIEVE_TOP_N: int = Field(200, description="RRF 融合后 Top-N 截断")
     ASKABLE_GAIN_THRESHOLD: float = Field(0.15, description="可问症状信息增益阈值")
     ENTITY_LINKING_TIER2_THRESHOLD: float = Field(0.92, description="terms_collection 向量检索 Cosine 截断")
-    RERANKER_CUTOFF_LAYERS: int | None = Field(None, description="layerwise early-exit 层数,None=全 28 层")
+    RERANKER_CUTOFF_LAYERS: int | None = Field(None, description="layerwise early-exit 层数,None=全 40 层(模型自身完整深度)")
 
 
 # ────────────────────────────────────────────────────────────────────────────

@@ -4022,21 +4022,21 @@ flowchart TD
 | 编号 | 任务名称 | 状态 | 完成日期 | 备注 |
 |------|---------|------|---------|------|
 | F1 | MedicalState 定义 + 初始化工厂 | [x] | 2026-05-01 | `src/agent/state.py` 实现(§4.1.1 37 字段 **Pydantic BaseModel** + 嵌套 `PresentIllnessSlots` / `SessionTokenUsage` / `SessionLatencyMs` + `create_initial_state`),8 测试 PASS(字段清单 + 类型校验 + 老数据反序列化默认值 + 多 session 不共享 + §9.2 演化规则) |
-| F2 | 节点 ①：info_collect | [ ] | | |
-| F2.5 | 节点 ①.5：analyze_initial_reports | [ ] | | |
-| F3 | 节点 ②：build_query | [ ] | | |
-| F4 | 节点 ③：retrieve | [ ] | | |
-| F5 | 节点 ④：extract_symptoms | [ ] | | |
-| F6 | 节点 ⑤：select_discriminative_symptom | [ ] | | |
-| F7 | 条件路由：should_continue | [ ] | | |
-| F8 | 节点 ⑥⑦：追问循环 | [ ] | | |
-| F9 | 节点 ⑧⑨：检查循环 | [ ] | | |
-| F10 | 节点 ⑩：diagnose | [ ] | | |
-| F11 | 条件路由：diagnose_router | [ ] | | |
-| F12 | 节点 ⑪：safety_gate | [ ] | | |
-| F13 | 节点 ⑫⑬：建议与输出 | [ ] | | |
-| F14 | StateGraph 编排 | [ ] | | |
-| F15 | 全工作流集成测试 | [ ] | | |
+| F2 | 节点 ①：info_collect | [x] | 2026-05-12 | LLM Step1 + DB Step2/3(占位见 `utils/patient_repo.py`，B 阶段建表后接真实 ORM）；3 unit PASS |
+| F2.5 | 节点 ①.5：analyze_initial_reports | [x] | 2026-05-12 | 多模态报告解析共享逻辑落 `utils/report_parser.py`（⑨ 复用）；非空报告调多模态 LLM，空 early return；3 unit PASS |
+| F3 | 节点 ②：build_query | [x] | 2026-05-12 | 4 步：NER → EL（每实体一次）→ 确定性术语扩展 → Query 构建；首轮自动初始化 confirmed/denied；check path 跳 Step1/2；3 unit PASS |
+| F4 | 节点 ③：retrieve | [x] | 2026-05-12 | dense + sparse 双路 + RRF 融合；PG callable 注入（`utils/chunks_lookup.py`）补 summary/question matched_text；3 unit PASS |
+| F5 | 节点 ④：extract_symptoms | [x] | 2026-05-12 | 零 LLM：TF-IDF 关键词 + 三层归一化（Tier1 alias 精确 / Tier2 向量阈值 / Tier3 保留原文）；3 unit PASS |
+| F6 | 节点 ⑤：select_discriminative_symptom | [x] | 2026-05-12 | 维度缺口配额制（≤2）+ 报告证据消费 + 已问过滤（Tier3 软比对）+ 信息增益贪心 + 可问性评估循环 + 阈值兜底；4 unit PASS |
+| F7 | 条件路由：should_continue | [x] | 2026-05-12 | 纯函数，三分支（cap / questions / 其他）；4 unit PASS（含不修改 State 验证） |
+| F8 | 节点 ⑥⑦：追问循环 | [x] | 2026-05-12 | ⑥a 自由文本生成 + ⑥b interrupt 等待 + ⑦ structured 解析（三类回答 + 维度回填 + present_illness 追加）；5 unit PASS |
+| F9 | 节点 ⑧⑨：检查循环 | [x] | 2026-05-12 | ⑧a 自由文本检查推荐 + ⑧b interrupt 等待 + ⑨ 复用 report_parser（全局 report_index 重映射）；4 unit PASS |
+| F10 | 节点 ⑩：diagnose | [x] | 2026-05-12 | Step-1 cap 短路 + Step0 reranker（已有 fallback）+ Step0.5 父块扩展 + 三步 LLM 链（EvidenceSheet / DiagnosisRanking / DiagnosisOutput）+ 任一步失败兜底 insufficient + failure_reason + last_diagnose_prompt/raw_output 写入；5 unit PASS（覆盖 spec §8.3 F10 五条路径） |
+| F11 | 条件路由：diagnose_router | [x] | 2026-05-12 | 纯函数：need_exam 且 exam_round<MAX → recommend_exam；否则 → safety_gate；5 unit PASS |
+| F12 | 节点 ⑪：safety_gate | [x] | 2026-05-12 | 规则层（allergy/pregnancy 直接抽取，spec §4.1.2 ⑪ TODO 重构方向待 B 阶段药品规则表落地）+ LLM 兜底（高安全级，失败保守追加通用警告）；4 unit PASS |
+| F13 | 节点 ⑫⑬：建议与输出 | [x] | 2026-05-12 | ⑫ generate_advice（failure_reason 三类对应 risk_warnings 提示）+ ⑬ format_response（失败兜底静态模板）；5 unit PASS |
+| F14 | StateGraph 编排 | [x] | 2026-05-12 | `src/agent/graph.py` 注册 16 节点 + 2 条件边；`build_app()` 默认 InMemorySaver；2 unit PASS（节点全 + compile 通过） |
+| F15 | 全工作流集成测试 | [x] | 2026-05-12 | 2 集成测试：正常 confirmed 全链路 + followup 触顶兜底全链路；interrupt resume 路径留 J 阶段 |
 
 ### 阶段 G：API 层与权限系统
 

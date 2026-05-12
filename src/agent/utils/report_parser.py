@@ -1,0 +1,118 @@
+"""src/agent/utils/report_parser.py — 多模态报告解析共享逻辑(DEV_SPEC §4.1.2 ①.5 / ⑨)。
+
+①.5 analyze_initial_reports 与 ⑨ process_exam_result 都需要"file_ref → ReportFinding"
+这条管道,封装在这里复用。
+
+工作流:
+  file_refs[]
+    → 用 report_loader.load_report 按需加载(图片转 base64,PDF 直传)
+    → 组装多模态 LangChain HumanMessage(text prompt + image_url 内容块)
+    → llm.with_structured_output(ReportFindings) 调用(中安全等级,§9.1 模板)
+    → ReportFindings.findings(每份报告一项)
+    → 节点代码补 report_index(对应 exam_reports 下标),写回 State
+
+LLM 模型:由 config.llm.MODEL_NAME 决定;若 .env 配的是非视觉模型(如纯文本
+qwen-plus),多模态消息会被忽略图片,只能从 prompt 文本部分推断 — 本模块**不强行**
+切换 vision 模型,由调用方/部署方负责选型(开放问题见 commit 总结)。
+"""
+from __future__ import annotations
+
+import logging
+import time
+
+from langchain_core.messages import HumanMessage
+
+from src.agent.schemas.report_parser import ReportFindings
+from src.agent.utils.report_loader import load_report
+from src.common.metrics import _attempts, _failures, _latency, retry_observer
+from src.models.llm_client import get_llm
+from src.prompts.agent import build_report_parsing_prompt
+
+
+_logger = logging.getLogger(__name__)
+
+
+def _build_multimodal_message(file_refs: list[str], prompt_text: str) -> HumanMessage:
+    """把 prompt_text + 各报告组装成 LangChain HumanMessage(content 列表形态)。"""
+    content: list[dict] = [{"type": "text", "text": prompt_text}]
+    for ref in file_refs:
+        try:
+            loaded = load_report(ref)
+        except (FileNotFoundError, ValueError) as e:
+            _logger.warning("report load failed (%s): %s — skipping", ref, e)
+            continue
+        if loaded["kind"] == "image":
+            content.append(
+                {"type": "image_url", "image_url": {"url": loaded["data_uri"]}}
+            )
+        elif loaded["kind"] == "pdf":
+            # OpenAI-compatible providers handle PDF as document part; format varies
+            # 不同 provider PDF 块格式不一(OpenAI v2 用 file,DashScope 走 application/pdf
+            # data URI),这里给 base64 data URI 兜底,provider 不支持时 LLM 会忽略
+            import base64
+            b64 = base64.b64encode(loaded["data"]).decode("ascii")
+            content.append(
+                {
+                    "type": "image_url",  # 用 image_url 通道兜底,部分 provider 兼容
+                    "image_url": {"url": f"data:application/pdf;base64,{b64}"},
+                }
+            )
+    return HumanMessage(content=content)
+
+
+def parse_reports(file_refs: list[str]) -> list[dict]:
+    """主入口:接收文件引用列表,返回结构化 finding 列表(已补 report_index)。
+
+    Returns:
+        list[dict],每项形态见 spec §4.1.1 report_findings 字段:
+        `{"report_type", "report_date", "report_index", "abnormal_values",
+          "impressions", "positive_findings", "negative_findings"}`
+
+    空 file_refs → 直接返回 [],不发起 LLM 调用(spec §4.1.2 ①.5 early return)。
+    """
+    if not file_refs:
+        return []
+
+    node = "analyze_reports"
+    schema = "ReportFindings"
+    prompt = build_report_parsing_prompt(num_reports=len(file_refs))
+    message = _build_multimodal_message(file_refs, prompt)
+
+    _attempts.labels(node=node, schema=schema).inc()
+    t0 = time.perf_counter()
+    try:
+        chain = get_llm().with_structured_output(ReportFindings).with_retry(
+            stop_after_attempt=3
+        )
+        result: ReportFindings = chain.invoke(
+            [message],
+            config={
+                "callbacks": [retry_observer],
+                "metadata": {"node": node, "schema": schema},
+            },
+        )
+    except Exception as e:
+        _failures.labels(
+            node=node, schema=schema, exception_type=type(e).__name__
+        ).inc()
+        _logger.error(
+            "[%s] report parsing failed (%d files): %s",
+            node, len(file_refs), e, exc_info=True,
+        )
+        # spec §9.3:本调用中安全级,但兜底策略是"该份报告标记解析失败,report_findings
+        # 不追加",流水线继续(降级为无该报告证据)。我们对**整批**做兜底:返回空列表
+        # 让调用方继续,而不是抛错终止整个 Agent 流程
+        return []
+    finally:
+        _latency.labels(node=node, schema=schema).observe(
+            time.perf_counter() - t0
+        )
+
+    # 节点代码补 report_index(对应 exam_reports 下标);LLM 输出 finding 数若与 file_refs
+    # 数不一致,以 LLM 输出为准截到合法范围(spec 不强制 1:1)
+    out: list[dict] = []
+    for i, finding in enumerate(result.findings):
+        record = finding.model_dump()
+        record["report_index"] = i if i < len(file_refs) else len(file_refs) - 1
+        out.append(record)
+    return out

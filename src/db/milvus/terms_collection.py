@@ -124,6 +124,34 @@ def search_aliases(
     return list(deduped.values())[:top_k]
 
 
+def query_term_by_alias_exact(alias: str) -> dict | None:
+    """按 alias 标量精确匹配查首选概念(Tier 1 精确匹配)。
+
+    DEV_SPEC §4.1.2 ④ extract_symptoms 阶段二 Tier 1 用:候选 chunk 关键词先做
+    精确别名匹配,命中即返回 concept_id + preferred_term,无需走 Tier 2 向量检索。
+
+    返回最早出现(按 concept_id 字典序)的命中项;同 alias 可能挂在多个 concept_id 下
+    (如"胸痛"可能既挂胸痛主概念也挂某种细分),取字母序最小者保证确定性。
+
+    Returns:
+        {"concept_id": str, "preferred_term": str} 或 None(无命中)
+    """
+    coll = ensure_terms_collection()
+    coll.load()
+
+    rows = coll.query(
+        expr=f'alias == "{alias}"',
+        output_fields=["concept_id", "preferred_term"],
+    )
+    if not rows:
+        return None
+    rows.sort(key=lambda r: r["concept_id"])
+    return {
+        "concept_id": rows[0]["concept_id"],
+        "preferred_term": rows[0]["preferred_term"],
+    }
+
+
 def query_aliases_by_concept_id(concept_id: str) -> list[str]:
     """按 concept_id 标量查询返回该概念的全部别名,按字母序排列。
 
