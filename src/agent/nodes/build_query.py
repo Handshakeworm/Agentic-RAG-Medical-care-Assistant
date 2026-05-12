@@ -55,9 +55,9 @@ def _call_ner(text: str) -> NERResult:
     _attempts.labels(node=node, schema=schema).inc()
     t0 = time.perf_counter()
     try:
-        chain = get_llm().with_structured_output(NERResult).with_retry(
-            stop_after_attempt=3
-        )
+        chain = get_llm().with_structured_output(
+            NERResult, method="json_mode"
+        ).with_retry(stop_after_attempt=3)
         return chain.invoke(
             build_ner_prompt(text),
             config={
@@ -90,9 +90,9 @@ def _call_entity_linking(
     _attempts.labels(node=node, schema=schema).inc()
     t0 = time.perf_counter()
     try:
-        chain = get_llm().with_structured_output(EntityLinkingResult).with_retry(
-            stop_after_attempt=3
-        )
+        chain = get_llm().with_structured_output(
+            EntityLinkingResult, method="json_mode"
+        ).with_retry(stop_after_attempt=3)
         result: EntityLinkingResult = chain.invoke(
             build_entity_linking_prompt(original_text, candidates),
             config={
@@ -177,7 +177,7 @@ def _call_query_construction(
     t0 = time.perf_counter()
     try:
         chain = get_llm().with_structured_output(
-            QueryConstructionOutput
+            QueryConstructionOutput, method="json_mode"
         ).with_retry(stop_after_attempt=3)
         return chain.invoke(
             build_query_construction_prompt(

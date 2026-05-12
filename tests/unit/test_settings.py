@@ -66,7 +66,8 @@ def test_all_settings_sections_accessible() -> None:
     """settings.<段>.<字段> 全部段必须能访问,防止段被误删/改名。"""
     from config.settings import settings
 
-    # 12 个段(11 个子段 + 1 个顶层 ENV)
+    # 11 个段(10 个子段 + 1 个顶层 ENV);chunking 段已删除(2026-05-12,
+    # 项目实际 chunking 走 §3.1.2 目录粒度,SIZE/OVERLAP 从未被引用)
     expected_sections = [
         "agent_limits",
         "postgres",
@@ -76,7 +77,6 @@ def test_all_settings_sections_accessible() -> None:
         "reranker",
         "llm",
         "retrieval",
-        "chunking",
         "jwt",
         "api",
         "paths",
@@ -109,8 +109,47 @@ def test_llm_api_key_required_when_missing(monkeypatch: pytest.MonkeyPatch) -> N
     from config.settings import LLMSettings
 
     monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_VISION_API_KEY", raising=False)
 
     with pytest.raises(ValidationError) as exc_info:
         LLMSettings(_env_file=None)  # 不读 .env,只看进程 env;模拟生产环境完全缺失
 
     assert "API_KEY" in str(exc_info.value)
+
+
+def test_llm_vision_api_key_required_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """主链路有 key 但 vision 缺 key 时,LLMSettings 仍必须报错 — F2.5/F9 报告解析必需。"""
+    from pydantic import ValidationError
+
+    from config.settings import LLMSettings
+
+    monkeypatch.setenv("LLM_API_KEY", "sk-main-test")
+    monkeypatch.delenv("LLM_VISION_API_KEY", raising=False)
+
+    with pytest.raises(ValidationError) as exc_info:
+        LLMSettings(_env_file=None)
+
+    assert "VISION_API_KEY" in str(exc_info.value)
+
+
+def test_llm_vision_defaults_match_dashscope_qwen() -> None:
+    """vision 三件套默认值锁:DashScope + qwen3.5-plus(F2.5/F9 多模态用)。"""
+    from config.settings import LLMSettings
+
+    fields = LLMSettings.model_fields
+    assert (
+        fields["VISION_BASE_URL"].default
+        == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    )
+    assert fields["VISION_MODEL_NAME"].default == "qwen3.5-plus"
+
+
+def test_llm_main_chain_defaults_match_deepseek() -> None:
+    """主链路默认值锁:DeepSeek + deepseek-v4-pro(廉价文本推理)。"""
+    from config.settings import LLMSettings
+
+    fields = LLMSettings.model_fields
+    assert fields["BASE_URL"].default == "https://api.deepseek.com/v1"
+    assert fields["MODEL_NAME"].default == "deepseek-v4-pro"

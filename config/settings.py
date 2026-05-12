@@ -92,11 +92,34 @@ class RerankerSettings(BaseSettings):
 
 
 class LLMSettings(BaseSettings):
+    """主链路 LLM(BASE_URL/API_KEY/MODEL_NAME)+ 多模态分支(VISION_*)。
+
+    主链路默认走 DeepSeek(廉价,14 处结构化调用用 LangChain 默认 function_calling
+    "虚拟工具"模式,不依赖 provider 原生 json mode);多模态走 DashScope qwen3.5-plus
+    (F2.5 / F9 报告解析,DeepSeek 不支持视觉)。
+
+    `with_structured_output(Schema)` 默认 method="function_calling",DeepSeek 是
+    OpenAI-compatible 协议支持 tool calling,可用——这跟 enrichment.py 走
+    `method="json_mode"` 只是开发者偏好不同,本项目 14 处调用点保持默认即可。
+    """
+
     model_config = SettingsConfigDict(env_prefix="LLM_", env_file=".env", extra="ignore")
 
-    BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    API_KEY: str = Field(..., description="LLM API 密钥,必须由 .env 提供;缺失时立即抛 ValidationError(DEV_SPEC §8.3 A3)")
-    MODEL_NAME: str = "qwen-max"
+    # 主链路
+    BASE_URL: str = "https://api.deepseek.com/v1"
+    API_KEY: str = Field(
+        ...,
+        description="LLM API 密钥,必须由 .env 提供;缺失时立即抛 ValidationError(DEV_SPEC §8.3 A3)",
+    )
+    MODEL_NAME: str = "deepseek-v4-pro"
+
+    # 多模态分支(F2.5 / F9 报告解析专用)
+    VISION_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    VISION_API_KEY: str = Field(
+        ...,
+        description="多模态 LLM API 密钥,F2.5/F9 报告解析必需;缺失立即抛 ValidationError",
+    )
+    VISION_MODEL_NAME: str = "qwen3.5-plus"
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -112,13 +135,6 @@ class RetrievalSettings(BaseSettings):
     SPARSE_TOP_K: int = 20
     DENSE_TOP_K: int = 20
     RERANK_TOP_K: int = 5
-
-
-class ChunkingSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="CHUNK_", env_file=".env", extra="ignore")
-
-    SIZE: int = 512
-    OVERLAP: int = 64
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -173,7 +189,6 @@ class Settings(BaseSettings):
     reranker: RerankerSettings = Field(default_factory=RerankerSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
-    chunking: ChunkingSettings = Field(default_factory=ChunkingSettings)
     jwt: JWTSettings = Field(default_factory=JWTSettings)
     api: APISettings = Field(default_factory=APISettings)
     paths: PathsSettings = Field(default_factory=PathsSettings)

@@ -210,15 +210,15 @@ def diagnose(state: MedicalState) -> dict:
 
     # ─── Step 1-3 链式调用,任一步失败立即停止 ───
     llm = get_llm()
-    evidence_chain = llm.with_structured_output(EvidenceSheet).with_retry(
-        stop_after_attempt=3
-    )
-    ranking_chain = llm.with_structured_output(DiagnosisRanking).with_retry(
-        stop_after_attempt=3
-    )
-    calibration_chain = llm.with_structured_output(DiagnosisOutput).with_retry(
-        stop_after_attempt=3
-    )
+    evidence_chain = llm.with_structured_output(
+        EvidenceSheet, method="json_mode"
+    ).with_retry(stop_after_attempt=3)
+    ranking_chain = llm.with_structured_output(
+        DiagnosisRanking, method="json_mode"
+    ).with_retry(stop_after_attempt=3)
+    calibration_chain = llm.with_structured_output(
+        DiagnosisOutput, method="json_mode"
+    ).with_retry(stop_after_attempt=3)
 
     history_summary = json.dumps(state.medical_history, ensure_ascii=False)[:600]
     slots_dict = state.present_illness_slots.model_dump()

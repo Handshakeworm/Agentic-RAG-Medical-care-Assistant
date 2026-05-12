@@ -62,9 +62,9 @@ def _call_dimension_selection(
     _attempts.labels(node=node, schema=schema).inc()
     t0 = time.perf_counter()
     try:
-        chain = get_llm().with_structured_output(DimensionSelection).with_retry(
-            stop_after_attempt=3
-        )
+        chain = get_llm().with_structured_output(
+            DimensionSelection, method="json_mode"
+        ).with_retry(stop_after_attempt=3)
         result: DimensionSelection = chain.invoke(
             build_dimension_selection_prompt(
                 chief_complaint=chief_complaint,
@@ -106,9 +106,9 @@ def _call_askability(symptom: str) -> bool:
     _attempts.labels(node=node, schema=schema).inc()
     t0 = time.perf_counter()
     try:
-        chain = get_llm().with_structured_output(AskabilityJudgment).with_retry(
-            stop_after_attempt=3
-        )
+        chain = get_llm().with_structured_output(
+            AskabilityJudgment, method="json_mode"
+        ).with_retry(stop_after_attempt=3)
         result: AskabilityJudgment = chain.invoke(
             build_askability_prompt(symptom),
             config={

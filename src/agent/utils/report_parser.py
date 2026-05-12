@@ -11,9 +11,9 @@
     → ReportFindings.findings(每份报告一项)
     → 节点代码补 report_index(对应 exam_reports 下标),写回 State
 
-LLM 模型:由 config.llm.MODEL_NAME 决定;若 .env 配的是非视觉模型(如纯文本
-qwen-plus),多模态消息会被忽略图片,只能从 prompt 文本部分推断 — 本模块**不强行**
-切换 vision 模型,由调用方/部署方负责选型(开放问题见 commit 总结)。
+LLM 模型:走 `settings.llm.VISION_*` 三件套(默认 qwen3.5-plus,DashScope 原生
+多模态;参考 `scripts/figure_enrichment_generation.py` 的 figure 增强流水线)。
+主链路走 DeepSeek(廉价),不支持视觉,所以本模块必须独立切到 DashScope。
 """
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ import time
 
 from langchain_core.messages import HumanMessage
 
+from config.settings import settings
 from src.agent.schemas.report_parser import ReportFindings
 from src.agent.utils.report_loader import load_report
 from src.common.metrics import _attempts, _failures, _latency, retry_observer
@@ -81,8 +82,14 @@ def parse_reports(file_refs: list[str]) -> list[dict]:
     _attempts.labels(node=node, schema=schema).inc()
     t0 = time.perf_counter()
     try:
-        chain = get_llm().with_structured_output(ReportFindings).with_retry(
-            stop_after_attempt=3
+        chain = (
+            get_llm(
+                model=settings.llm.VISION_MODEL_NAME,
+                base_url=settings.llm.VISION_BASE_URL,
+                api_key=settings.llm.VISION_API_KEY,
+            )
+            .with_structured_output(ReportFindings, method="json_mode")
+            .with_retry(stop_after_attempt=3)
         )
         result: ReportFindings = chain.invoke(
             [message],

@@ -28,18 +28,26 @@ from config.settings import settings
 def get_llm(
     *,
     model: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
     temperature: float = 0.1,
     timeout_seconds: int = 30,
 ) -> ChatOpenAI:
     """返回 ChatOpenAI 实例,同参数自动复用(lru_cache)。
 
-    默认从 settings.llm 读 BASE_URL / API_KEY / MODEL_NAME。
-    各节点若需不同模型/温度,显式传参覆盖(如 enrichment 用更小模型 + 高温)。
+    默认走主链路(settings.llm.BASE_URL / API_KEY / MODEL_NAME — DeepSeek)。
+    多模态调用(F2.5 / F9 report_parser)需要显式传 vision 三件套:
+        get_llm(
+            model=settings.llm.VISION_MODEL_NAME,
+            base_url=settings.llm.VISION_BASE_URL,
+            api_key=settings.llm.VISION_API_KEY,
+        )
+    enrichment 等场景若要换模型/温度,显式传参覆盖。
     """
     return ChatOpenAI(
         model=model or settings.llm.MODEL_NAME,
-        base_url=settings.llm.BASE_URL,
-        api_key=settings.llm.API_KEY,
+        base_url=base_url or settings.llm.BASE_URL,
+        api_key=api_key or settings.llm.API_KEY,
         temperature=temperature,
         timeout=timeout_seconds,
     )

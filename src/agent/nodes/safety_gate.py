@@ -96,9 +96,9 @@ def _call_llm_fallback(
     _attempts.labels(node=_NODE, schema=_SCHEMA).inc()
     t0 = time.perf_counter()
     try:
-        chain = get_llm().with_structured_output(SafetyGateOutput).with_retry(
-            stop_after_attempt=3
-        )
+        chain = get_llm().with_structured_output(
+            SafetyGateOutput, method="json_mode"
+        ).with_retry(stop_after_attempt=3)
         return chain.invoke(
             prompt,
             config={
