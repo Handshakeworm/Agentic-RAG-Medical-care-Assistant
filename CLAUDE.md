@@ -64,7 +64,7 @@ source .venv/bin/activate
 | Seed terms vector DB (D2) | `python -m terms.build_icd10 --icd-xlsx /data/medical-resources/ICD10/<file>.xlsx` |
 | Batch parse all PDFs with MinerU hybrid | `bash scripts/batch_parse_pdfs.sh` |
 
-Dependencies are managed via `pyproject.toml` with `uv` (Python 3.12, `<3.13`). PyTorch must be `>=2.7` for the RTX 5070 Ti (Blackwell) target — the project pins the `cu126` index in `[tool.uv].extra-index-url`.
+Dependencies are managed via `pyproject.toml` with `uv` (Python 3.12, `<3.13`). PyTorch must be `>=2.7` for the RTX 5070 Ti (Blackwell) target — the project pins the **`cu128`** index in `[tool.uv].extra-index-url`. The `cu126` wheel only ships GPU kernels up to `sm_90` (no Blackwell `sm_120`); only `cu128`+ wheels include it. PyTorch wheels carry their own CUDA runtime, so the system `nvcc` toolkit version is irrelevant.
 
 ## High-level architecture
 

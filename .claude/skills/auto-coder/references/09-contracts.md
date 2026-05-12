@@ -795,7 +795,7 @@ async def diagnose(req: DiagnoseRequest,
 | `RETRIEVE_TOP_N` | `200` | RRF 融合后 Top-N 截断（送入 ④ `extract_symptoms` 与 ⑩ Step 0 Cross-Encoder） | ③ `retrieve`（§4.1.2）/ §3.2.2 |
 | `ASKABLE_GAIN_THRESHOLD` | `0.15` | 可问症状信息增益阈值（低于此值的症状候选从 `followup_questions` 中剔除） | ⑤ `select_discriminative_symptom`（§4.1.2）|
 | `ENTITY_LINKING_TIER2_THRESHOLD` | `0.92` | Tier 2 向量检索相似度截断（terms_collection 查询 Top-5 中，Cosine Similarity ≥ 此值才视为命中） | ④ `extract_symptoms` Tier 2（§4.1.2，§2.4.6）|
-| `RERANKER_CUTOFF_LAYERS` | `None`（表示全层 28） | Cross-Encoder BGE-Reranker-v2-minicpm-layerwise 提前退出的层数；`None` = 不截断 | ⑩ Step 0 / Reranker 客户端（§2.3，§3.2.3）|
+| `RERANKER_CUTOFF_LAYERS` | `None`（=全层不截断；模型 layerwise 完整深度，BGE-Reranker-v2-minicpm-layerwise 为 40 层） | Cross-Encoder layerwise early-exit 截断层数；`None` = 跑满全层 | ⑩ Step 0 / Reranker 客户端（§2.3，§3.2.3）|
 | `RETRIEVE_PARENT_FIGURE_CAP` | `5` | Context 扩展规则 3:父块在 LLM context 里能带的同节图表数封顶（`chunk_type ∈ {table, figure}` 计数;按 `relative_chunk_index` 升序保留前 K 个） | ⑩ Step 0 后 / Context 扩展(§3.2.3)|
 
 ### 9.7.2 定义位置与类型

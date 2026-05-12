@@ -204,23 +204,23 @@
 | 编号 | 任务名称 | 状态 | 完成日期 | 备注 |
 |------|---------|------|---------|------|
 | A1 | 初始化目录树与最小可运行入口 | [x] | 2026-05-01 | §1.3.1 目录树修订(删过时 `data/` + 简化 `terms/`);`src/__init__.py` + `src/__main__.py` 就绪,`python -m src` 通过 |
-| A2 | Docker Compose 搭建存储基座 | [~] | | 已:compose 配齐(13 服务,Mongo 已删)、Milvus etcd/minio/standalone 三件套 healthy、端口绑 127.0.0.1 防外网;待:PG/Redis 实启验证 |
+| A2 | Docker Compose 搭建存储基座 | [x] | 2026-05-12 | compose 配齐 + Milvus 三件套 + PG + Redis 5 服务全部 healthy(`docker compose ps` 验证),端口绑 127.0.0.1 防外网。监控类服务(Prometheus/Grafana/Loki/Node Exporter/DCGM)留 H 阶段验收 |
 | A3 | 配置加载与校验 | [x] | 2026-05-01 | `config/settings.py` 实现(§9.7 + `LLM_API_KEY` 必填),5 测试 PASS;spec 同步删除冗余的 `config/model_config.py` |
-| A4 | pytest 测试基座 | [~] | | 已:tests/ 双层(unit 5 + integration 5)、`test_settings.py` 4/4 PASS、`test_terms_retrieval_smoke.py` collect OK(等 mineru 跑完 GPU 释放再实跑)、CLAUDE.md 加测试位置规则;待:conftest 设计、`test_reranker_smoke` / `test_terms_retrieval_smoke` 真跑过 |
-| A5 | 公共工具模块 | [ ] | | |
-| A6 | Prompt 模板骨架 | [ ] | | |
+| A4 | pytest 测试基座 | [x] | 2026-05-12 | tests/{unit,integration,e2e} 三层目录就绪,257 PASS / 3 skip(GPU 模型 skip);CLAUDE.md 加测试位置规则;conftest YAGNI(无共享 fixture 需求)。`test_reranker_smoke` / `test_terms_retrieval_smoke` 由本地 GPU 任务跑过 |
+| A5 | 公共工具模块 | [x] | 2026-05-12 | `src/common/normalize.py`(C3 用)+ `hashing.py`(SHA256,§3.1.4 各 ID 派生)+ `metrics.py`(F 阶段补,§9.1 6 指标 Prometheus 单例 + RetryObserver);单测覆盖 normalize/hashing,metrics 在节点 unit 测里间接验证 |
+| A6 | Prompt 模板骨架 | [~] | | 已:`src/prompts/ingestion.py`(C4 enrichment + figure summary)+ `agent.py`(F 阶段 14 prompt builders);待:`src/prompts/evaluation.py`(I 阶段 LLM Judge,各 evaluator 写时再补) |
 
 ### 阶段 B：数据层与模型客户端
 
 | 编号 | 任务名称 | 状态 | 完成日期 | 备注 |
 |------|---------|------|---------|------|
-| B1 | PostgreSQL 连接池 + ORM 模型 | [~] | | 已:`connection.py`(engine + session_scope)+ `models.py` Source/RawDocument/Chunk + 配套 upsert/bulk_upsert 接口(7 unit + 5 integration PASS,含父子 FK + 部分索引验证 + TEXT[] roundtrip);待:users/patients/sessions/conversations/audit 等 G/F 阶段才用的表 ORM |
-| B2 | PostgreSQL 迁移脚本 | [~] | | 已:`0001_raw_documents.sql`(sources + raw_documents + GIN)、`0002_chunks.sql`(chunks + 5 索引,含两个 partial index);待:其他表迁移、Alembic 接入(2 个迁移阶段手动 psql 即可,Alembic 推迟到表数 ≥ 5 才接) |
+| B1 | PostgreSQL 连接池 + ORM 模型 | [x] | 2026-05-12 | `connection.py` + `models.py`(Source/RawDocument/Chunk)+ `models_patient.py`(User/Patient + 8 张患者历史表 §2.4.5)+ `models_dialog.py`(Session/Conversation §2.4.3)+ `models_audit.py`(RagTrace 15 字段/KbChangeLog/ConfigChangeLog/DiagnosisFeedback/SystemConfig §5.2.3 + §5.3),共 20 张表统一挂在 `Base.metadata`;`__init__.py` 集中导出 + Alembic env.py 自动扫描;26 unit(15 老 + 20 新)+ 24 integration(11 老 + 12 新 patient/dialog/audit CRUD + 1 alembic upgrade head)PASS |
+| B2 | PostgreSQL 迁移脚本 | [x] | 2026-05-12 | 6 个 SQL 文件齐(0001-0003 老 + 0004 users_patients + 0005 sessions_conversations + 0006 audit_config),含 patient cascade / sessions partial index `WHERE status='active'` / medications partial index `WHERE ended_at IS NULL` / rag_trace 3 索引等;Alembic 接入(`alembic.ini` + `env.py` 走 `settings.postgres.dsn` + `_helpers.execute_sql_file` 用 `exec_driver_sql` 绕开 `:name` bind 解析)+ baseline 现有 PG;`tests/integration/test_alembic_upgrade.py` 在隔离 schema 跑通 `alembic upgrade head` 验全部 20 张表 + 关键索引 + alembic_version=head |
 | B3 | Milvus 连接管理 + docs_collection | [x] | 2026-05-01 | `config/milvus_schema.py` 9 字段 schema(spec 8 + BM25 派生 sparse)+ HNSW dense / BM25 sparse(中文 analyzer)/ 3 scalar 索引;`src/db/milvus/docs_collection.py` ensure/upsert/search_dense/search_sparse_bm25/count/drop;9 unit + 5 integration PASS(中文 BM25 命中"胆囊炎"验证) |
 | B4 | Milvus terms_collection | [x] | 2026-04-30 | schema(8 字段)+ HNSW + INVERTED 索引 + ensure/upsert/search/count/drop 接口齐;`config/milvus_schema.py` + `src/db/milvus/terms_collection.py` |
 | B5 | PostgreSQL raw_documents 表（MinerU 产物存储） | [x] | 2026-05-02 | `connection.py`(engine + session_scope)+ `models.py`(Source/RawDocument ORM + `upsert_source`/`upsert_raw_document` 幂等接口,ON CONFLICT DO UPDATE);4 个 JSONB 字段全 NOT NULL(spec §2.4.4 修订版);11 测试 PASS(6 unit schema 锁 + 5 integration:upsert/幂等/级联删/GIN jsonpath 查 type/FK 违反) |
-| B6 | Qwen3-Embedding-8B 客户端 | [~] | | 已:8bit 加载链路验证(BitsAndBytesConfig + device_map='auto'),scripts 内已实战调用,显存 9.3GB;待:封装到 `src/models/embedding_model.py` |
-| B7 | BGE-Reranker-v2-minicpm-layerwise 客户端 | [~] | | 已:`src/rag/retrieval/reranker.py` 封装 LayerWiseFlagLLMReranker(lazy load + cutoff_layer=28)+ 冒烟测试 `tests/integration/test_reranker_smoke.py`;待:真跑过测试 |
+| B6 | Qwen3-Embedding-8B 客户端 | [x] | 2026-05-11 | `src/models/embedding_model.py`:`EmbeddingModel`(8bit BitsAndBytesConfig + device_map='auto' + SentenceTransformer)+ encode/encode_one + `get_embedding_model()` 进程内 singleton(双检锁)。`DEFAULT_BATCH=8`(实测 batch=16 在长文本 chunk 上偶发 CUDA OOM,降到 8 后稳态显存 ~12GB 杜绝 OOM,吞吐量未损)。`terms/build_icd10.py` 已复用该 singleton 删本地 `load_embedding_model()` |
+| B7 | BGE-Reranker-v2-minicpm-layerwise 客户端 | [~] | | 已:`src/rag/retrieval/reranker.py` 封装 LayerWiseFlagLLMReranker(lazy load + `cutoff_layers` 走 §9.7 `agent_limits.RERANKER_CUTOFF_LAYERS`)+ `rerank_with_fallback` 高阶函数(timeout / fallback,9 unit PASS,在 F10 diagnose Step 0 已被使用);**还差**:`tests/integration/test_reranker_smoke.py` 真 GPU 跑过(模型权重已下载到 RERANKER_MODEL_PATH,需 GPU 空闲时跑一次锁住 layerwise 切层与排序行为) |
 | B8 | Qwen LLM 推理客户端 | [x] | 2026-05-01 | `src/models/llm_client.py::get_llm()` 工厂(lru_cache,薄层不封装 retry/metrics 按 §9.1);7 测试 PASS(5 unit + 2 integration smoke 真调 DashScope qwen3.5-122b-a10b 通,流式 + 非流式) |
 
 ### 阶段 C：Ingestion Pipeline
@@ -228,20 +228,20 @@
 | 编号 | 任务名称 | 状态 | 完成日期 | 备注 |
 |------|---------|------|---------|------|
 | C1 | MinerU 产物加载器 | [x] | 2026-05-02 | `src/rag/ingestion/mineru_loader.py::load_mineru_output()`(177 行)读 4 文件 + **双清洗 image VLM 幻觉**(v2 `block.content.content` 删除 + 用同段文本作指纹精确 substring 删 markdown,短指纹 < 20 字符跳过防误删,清洗后 grep 自检 unclean 报 warning)+ source_id 走 C3 + upsert sources/raw_documents + 返回 stats dict(预留 H2/§5.2.3 埋点接口);保留 image_caption / image_footnote / bbox / `![](images/...)` 占位符 / table.html / chart.content / page_header 等(过滤归 C2);11 unit + 3 integration PASS;`scripts/load_mineru.py` 批量入口(单本/--all);**13 本教材全部灌入 PG**(13912 页 / 264948 block / 删 7426 image content / 0 指纹遗漏 / 22.6s,raw_documents 表占 273MB);顺手删 0 行僵尸文件 `image_caption.py` |
-| C2 | Chunking(父子分块 + 图表 chunk) | [~] | 2026-05-12 | **POC 12 本切分完成,全部 mismatch=0**(~12k 父块 + ~25k 子块);通用 SOP 见 [scripts/METHODOLOGY.md](scripts/METHODOLOGY.md) + 各书 BOOK_NOTES。**12 本图表 manifest 流水线就绪**:`extract_figures.py` 出 4026 条 manifest;`derive_figure_heading_paths.py` 按 (pg_start, head 前缀) 反查 POC parent 关联 heading_path(3891 hit / 135 孤儿);`merge_multipanel_figures.py` 多面板合并 27 anchor 吸 33 sibling;`merge_crosspage_tables.py` 跨页冗余 89 anchor 吸 91 dup;`reroute_figure_in_table.py` 16 条 chunk_kind 误标修正。**chunks 表落库就绪**:`load_chunks_to_pg.py` 灌 31063 text 行 + `load_media_chunks_to_pg.py` 灌 3767 图表行(单行多列设计,2026-05-12 重构自原"源+summary"双行,见 migration 0003 / spec §3.1.2)。**block extractor `extract_chunkable_text` 已实现**(15 unit PASS)。**待:step3 POC port 到 production** `src/rag/ingestion/chunking.py` 主流程 |
-| C2.5 | 用药指南专用处理(待定) | [ ] | | **背景**:《中国医师药师临床用药指南》是药典/reference book(每药品名独立 title,30289 条),通用"篇/章/节"chunking 策略不适用(C2-step1 验证 fallback 99.9%)。**候选方案**:A 药品级 chunker(每药品 → 1 条完整 chunk 含【适应症】【用法】【禁忌】) / B 改 PG `drug_reference` 表 + terms_collection alias linking(更贴药典 reference 本质,绕开 Milvus 模糊检索的 overkill)。**当前**:raw_documents 已灌(source_id `189905989d350dd2`),C2 主流程通过 exclude 列表跳过它,C5/C6 同样跳过,本 RAG 主线不阻塞。**决策时机**:C2 主流程 + 12 本 chunking 跑通后,根据实际检索召回率与产品场景独立 PR |
+| C2 | Chunking(父子分块 + 图表 chunk) | [~] | 2026-05-12 | **POC 12 本切分完成,全部 mismatch=0**(~12k 父块 + ~25k 子块);通用 SOP 见 [scripts/METHODOLOGY.md](scripts/METHODOLOGY.md) + 各书 BOOK_NOTES。**12 本图表 manifest 流水线就绪**:`extract_figures.py` 出 4026 条 manifest;`derive_figure_heading_paths.py` 按 (pg_start, head 前缀) 反查 POC parent 关联 heading_path(3891 hit / 135 孤儿);`merge_multipanel_figures.py` 多面板合并 27 anchor 吸 33 sibling;`merge_crosspage_tables.py` 跨页冗余 89 anchor 吸 91 dup;`reroute_figure_in_table.py` 16 条 chunk_kind 误标修正。**chunks 表落库就绪**:`load_chunks_to_pg.py` 灌 31063 text 行 + `load_media_chunks_to_pg.py` 灌 3767 图表行(单行多列设计,2026-05-12 重构自原"源+summary"双行,见 migration 0003 / spec §3.1.2)。**block extractor `extract_chunkable_text` 已实现**(15 unit PASS)。**还差**:Step3 POC port 到 production `src/rag/ingestion/chunking.py` 主流程(MVP 阶段不阻塞 — 12 本书已切完入库,新书入库时再做) |
+| C2.5 | 用药指南专用处理(待定) | [ ] | | **用户已确认 deferred**(2026-05-12),用药指南 30289 条药品后续录入,F12 safety_gate 规则层暂用结构化 `medical_history` 直接抽取过敏/妊娠 + LLM 兜底。背景与候选方案见 spec §8.3 C2.5 / pending tasks。**还差**:整个任务,待用药指南规则表录入(用户主导) |
 | C3 | 幂等性工具 | [x] | 2026-05-02 | `src/rag/ingestion/idempotency.py` 6 个纯函数(normalize / source_id / heading_path_id / chunk_id / parent_chunk_id / content_hash);全部按 §3.1.4 规则,无 IO 无状态;30 unit PASS(覆盖 normalize 6 个、source_id 5、heading_path 5、chunk_id 3、parent 3、content_hash 4 + 综合 4) |
 | C4 | LLM 语义增强 | [x] | 2026-05-12 | **三路 enrichment 全跑完且入 PG**:① child 22287/22287(deepseek-v4-pro,`scripts/enrichment.py`)→ `load_enrichment_to_pg.py` 灌 title/summary/hq 3 字段;② figure(原 chart + flowchart)1023/1023(qwen3.5-plus 多模态 vision,`figure_enrichment_generation.py`,0 fail);③ table 2744/2744(deepseek-v4-pro,`table_enrichment_generation.py`,0 fail)→ `load_media_chunks_to_pg.py` 单步 4 字段灌入(含 medical_statement)。**单步 4 字段设计**(替代原 spec "两步":vision 看图直出 4 字段,避 Stage 2 enrichment 看不到图的视觉幻觉扩散);schema `FigureSummaryEnrichmentOutput`(§9.5)+ shared prompt tail `_SHARED_4FIELD_TAIL`(临床/口语 question 分布、英中混排、caption 杂质识别)+ footnote 必传(强调解读缩写/图例,不写参考文献入 ms);deepseek 走 `method="json_mode"` 避 json_schema BadRequest。**2026-05-12 单行多列重构**:删 tags / linked_chunk_id / bm25_only;content_hash 改 B 方案 `SHA256(chunk_raw_text + medical_statement)` 让 mineru 或 LLM 任一变化都触发重 embed |
-| C5 | 多向量 Embedding | [ ] | | |
-| C6 | 三层存储写入 + 僵尸清理 | [ ] | | |
-| C7 | Pipeline 编排 | [ ] | | |
-| C8 | 摄取入口脚本 | [ ] | | |
+| C5 | 多向量 Embedding | [x] | 2026-05-11 | `src/rag/ingestion/embedding.py::build_milvus_records` 把 PG chunks 行扩展为 1 original + 1 summary + N question 条 Milvus 记录(child 用 chunk_raw_text 作 dense,table/figure 用 medical_statement;text_for_bm25 仅 original 非空,符合 §3.1.5.1)。`scripts/load_chunk_embeddings_to_milvus.py` 按 source_id 分批 → encode → upsert → PG 标 done(异常 → 标 failed 可重置重跑,幂等)。**全量灌入完成**:26054 chunks → **Milvus 129810 entities**(平均 4.98 records/chunk),0 failed / 0 pending;首次 batch=16 全量耗时 58 min 含 3 次 OOM 共 900 chunks 标 failed,改 batch=8 后 2.2 min 补跑完毕 0 fail。端到端检索 sanity 通过(`急性胸痛伴出汗如何处理` → Dense 命中 question 向量、BM25 命中 original) |
+| C6 | 三层存储写入 + 僵尸清理 | [ ] | | **写入部分实际已完成**(scripts/load_chunks_to_pg.py + load_media_chunks_to_pg.py + load_chunk_embeddings_to_milvus.py 走 ON CONFLICT DO UPDATE 幂等灌入,12 本书 26054 chunks → 129810 Milvus entities 全成功)。**还差**:① `src/rag/ingestion/storage.py` 把散落 scripts 收口到 production 模块;② 僵尸 chunk 差集清理(重灌时 PG 旧 chunk 删除 + 对应 Milvus 子向量先删 — spec §3.1.4.3)。**MVP 阶段不阻塞**(不重灌就不需要清理) |
+| C7 | Pipeline 编排 | [ ] | | scripts 里散落 `load_mineru.py` / `enrichment.py` / `figure_enrichment_generation.py` / `table_enrichment_generation.py` / `load_*_to_pg.py` / `load_chunk_embeddings_to_milvus.py` 构成事实上的 pipeline。**还差**:`src/rag/ingestion/pipeline.py` 把这些串成一个统一函数。**MVP 阶段不阻塞**(scripts 已能跑通新书入库) |
+| C8 | 摄取入口脚本 | [ ] | | scripts 里有 `batch_parse_pdfs.sh`(MinerU 批量解析)+ 各 `load_*.py` 灌库脚本,事实上能跑批。**还差**:① `scripts/ingest.py` 单文件 CLI 入口;② `scripts/init_db.py` PG 表创建脚本(目前手工跑 `migrations/0001_*.sql` / `0002_*.sql`);③ `scripts/init_milvus.py` Milvus collection 创建脚本(目前 `ensure_*_collection` 在首次调用自动建表)。**MVP 阶段不阻塞**(C7/C8 一起做,等 production pipeline 收口时一并补) |
 
 ### 阶段 D：术语库与 Entity Linking
 
 | 编号 | 任务名称 | 状态 | 完成日期 | 备注 |
 |------|---------|------|---------|------|
-| D1 | 术语数据整理与清洗 | [~] | | 已:ICD-10 北京临床版 v601 下载就位(/data/medical-resources/ICD10/,40k 行)+ build_icd10.py 内嵌清洗(去重、空值过滤、类型推导);待:CMeSH 等其他来源(YAGNI 暂不做) |
+| D1 | 术语数据整理与清洗 | [~] | | 已:ICD-10 北京临床版 v601 下载就位(/data/medical-resources/ICD10/,40k 行)+ `terms/build_icd10.py` 内嵌清洗(去重、空值过滤、类型推导)。**还差(YAGNI 暂不做)**:CMeSH 等其他术语源 — 当前每 ICD 编码只灌 1 别名(=preferred_term 自身),E1 Sparse 词袋实际单 token,等口语词表灌库后多别名效果才完整。用户已确认暂不做 |
 | D2 | 术语库构建脚本 | [x] | 2026-04-30 | `terms/build_icd10.py` 灌入 40474 条 ICD-10 北京临床版;主键 `{icd_code}_{SHA256(alias)[:16]}` + Milvus upsert 保证幂等;categorize:R 段→symptom,其他→disease |
 | D3 | 术语检索接口 | [x] | 2026-04-30 | `search_aliases` 候选池放大 + 按 `preferred_term` 去重(score 同则取 concept_id 更短/字母序更小);确定性 tie-break 保证幂等;冒烟测试 11 条 query Top-1 命中率 95%、Top-K 信息密度 5/5 |
 
@@ -249,40 +249,40 @@
 
 | 编号 | 任务名称 | 状态 | 完成日期 | 备注 |
 |------|---------|------|---------|------|
-| E1 | 查询预处理（分路构建） | [ ] | | |
-| E2 | Sparse Retriever（Milvus BM25） | [ ] | | |
-| E3 | Dense Retriever（单次 ANN） | [ ] | | |
-| E4 | 单阶段多路 RRF 融合 + 多向量聚合 | [ ] | | |
-| E5 | Reranker 精排 + 回退（diagnose ⑩ 前置） | [ ] | | |
-| E6 | 元数据过滤 | [ ] | | |
+| E1 | 查询预处理（分路构建） | [x] | 2026-05-12 | `src/rag/retrieval/query_processing.py` 三函数(`expand_aliases` / `build_sparse_query_bag` / `build_sparse_queries`):长度 ≤ 1 别名过滤、跨 concept 去重、空词袋自动跳过(spec §3.2.1 Step 2 边界);`terms_collection.py` 加 `query_aliases_by_concept_id` scalar 查询接口(字母序确定性,幂等);15 unit + 5 integration PASS(临时 terms_collection 隔离生产 4w 行数据)。LLM 调用与 prompt 由 F3 build_query 节点持有(spec §3.2.1 + §8.3 E1 任务说明边界)。**待 D1 补**:当前 D2 每 ICD 编码只灌 1 别名(=preferred_term 自身),词袋实际单 token,等 CMeSH 等口语词表灌库后多别名词袋效果才完整 |
+| E2 | Sparse Retriever（Milvus BM25） | [x] | 2026-05-12 | `src/rag/retrieval/sparse_retriever.py::search_sparse_routes` 高阶函数:循环调底层 `docs_collection.search_sparse_bm25`,N 个维度 = N 次 BM25(顺序保留);默认 top_k = `settings.agent_limits.RETRIEVE_TOP_N`(spec gap:E2 说"返回 Top-N"未明示数字,按 §9.7 取齐);`source_id_filter` pre-filter 透传(对接 E6);6 unit + 4 integration PASS(临时 docs_collection 隔离,验证多维度命中、跨维度共命中、source pre-filter、空入入兜底) |
+| E3 | Dense Retriever（单次 ANN） | [x] | 2026-05-12 | `src/rag/retrieval/dense_retriever.py::search_dense_route(dense_query, top_k=None, source_id_filter=None)`:文本经 `get_embedding_model().encode_one` → `docs_collection.search_dense`,不传 vector_type_filter(spec §3.2.2 三类向量均参与召回);默认 top_k = `settings.agent_limits.RETRIEVE_TOP_N`;6 unit + 3 integration PASS(真 Embedding 8B INT8 + 真 Milvus 临时 collection,3 条临床主题 chunk 验证语义命中:右上腹剧痛 query 命中胆囊炎 chunk Top-1) |
+| E4 | 单阶段多路 RRF 融合 + 多向量聚合 | [x] | 2026-05-12 | `src/rag/retrieval/fusion.py::fuse_routes(dense, sparse_routes, top_n, rrf_k=60, pg_chunk_lookup)`:5 步流程(record-level RRF 求和 → chunk-level 多向量聚合 → top_n 截断 → PG 仅对存活 chunk 回查 summary/hypothetical_questions → 装配 vector_hits);matched_text 三类规则按 spec §3.2.2 行 1822-1825(original 直读 hit / summary+question 走 PG lookup);question vector ID 解析 `_q{n}` 后缀(spec §3.1.6.2 + §3.2.2 已与代码对齐统一为 `_q{n}`);PG lookup 注入设计便于单测 mock,只对截断存活且需 summary/question 的 chunk 调用节省 IO;21 unit PASS(覆盖 RRF 公式/跨路求和/多向量聚合/top_n 截断/同分字母序 tie-break/vector_hits 形态/matched_text 三类/lookup 调用优化/边界) |
+| E5 | Reranker 精排 + 回退（diagnose ⑩ 前置） | [x] | 2026-05-12 | `src/rag/retrieval/reranker.py::rerank_with_fallback(query, documents, top_k, timeout_sec=10, enabled=True, reranker=None)` 高阶函数:用 ThreadPoolExecutor 实现 best-effort 超时;**spec §3.2.3 强约束 - 不抛异常**(模型异常 / 超时 / disabled 三种 fallback 路径都返回原序 idx 列表);返回 `list[int]` 解耦 candidate_chunks 形态;9 unit PASS(正常排序/top_k 截断/disabled 跳过/空入入/异常 fallback/超时 fallback/timeout=None 不限时)。底层 `Reranker` / `get_reranker` 沿用 B7 实现 |
+| E6 | 元数据过滤 | [x] | 2026-05-12 | Pre-filter 已在 E2/E3 通过 `source_id_filter` 透传到底层 Milvus(覆盖 spec §3.2.3 "硬约束在底层索引提前过滤"),本任务补 Post-filter 框架:`src/rag/retrieval/metadata_filter.py::apply_post_filters(candidates, predicates)` 接受 predicate list(签名 `dict → bool|None`),全部 True/None 才保留;**spec §3.2.3 'missing → include' 宽松策略**实现:返回 None / 抛 KeyError/AttributeError/TypeError 视为通过,其他异常冒泡;`source_id_in_allowlist` factory 演示常用 predicate 模式;14 unit PASS(空 predicates / AND 语义 / 三类 missing 异常宽松 / 其他异常冒泡 / 顺序保留 / factory 行为) |
 
 ### 阶段 F：Agent 工作流
 
 | 编号 | 任务名称 | 状态 | 完成日期 | 备注 |
 |------|---------|------|---------|------|
 | F1 | MedicalState 定义 + 初始化工厂 | [x] | 2026-05-01 | `src/agent/state.py` 实现(§4.1.1 37 字段 **Pydantic BaseModel** + 嵌套 `PresentIllnessSlots` / `SessionTokenUsage` / `SessionLatencyMs` + `create_initial_state`),8 测试 PASS(字段清单 + 类型校验 + 老数据反序列化默认值 + 多 session 不共享 + §9.2 演化规则) |
-| F2 | 节点 ①：info_collect | [ ] | | |
-| F2.5 | 节点 ①.5：analyze_initial_reports | [ ] | | |
-| F3 | 节点 ②：build_query | [ ] | | |
-| F4 | 节点 ③：retrieve | [ ] | | |
-| F5 | 节点 ④：extract_symptoms | [ ] | | |
-| F6 | 节点 ⑤：select_discriminative_symptom | [ ] | | |
-| F7 | 条件路由：should_continue | [ ] | | |
-| F8 | 节点 ⑥⑦：追问循环 | [ ] | | |
-| F9 | 节点 ⑧⑨：检查循环 | [ ] | | |
-| F10 | 节点 ⑩：diagnose | [ ] | | |
-| F11 | 条件路由：diagnose_router | [ ] | | |
-| F12 | 节点 ⑪：safety_gate | [ ] | | |
-| F13 | 节点 ⑫⑬：建议与输出 | [ ] | | |
-| F14 | StateGraph 编排 | [ ] | | |
-| F15 | 全工作流集成测试 | [ ] | | |
+| F2 | 节点 ①：info_collect | [x] | 2026-05-12 | LLM Step1 + DB Step2/3(占位见 `utils/patient_repo.py`，B 阶段建表后接真实 ORM）；3 unit PASS |
+| F2.5 | 节点 ①.5：analyze_initial_reports | [x] | 2026-05-12 | 多模态报告解析共享逻辑落 `utils/report_parser.py`（⑨ 复用）；非空报告调多模态 LLM，空 early return；3 unit PASS |
+| F3 | 节点 ②：build_query | [x] | 2026-05-12 | 4 步：NER → EL（每实体一次）→ 确定性术语扩展 → Query 构建；首轮自动初始化 confirmed/denied；check path 跳 Step1/2；3 unit PASS |
+| F4 | 节点 ③：retrieve | [x] | 2026-05-12 | dense + sparse 双路 + RRF 融合；PG callable 注入（`utils/chunks_lookup.py`）补 summary/question matched_text；3 unit PASS |
+| F5 | 节点 ④：extract_symptoms | [x] | 2026-05-12 | 零 LLM：TF-IDF 关键词 + 三层归一化（Tier1 alias 精确 / Tier2 向量阈值 / Tier3 保留原文）；3 unit PASS |
+| F6 | 节点 ⑤：select_discriminative_symptom | [x] | 2026-05-12 | 维度缺口配额制（≤2）+ 报告证据消费 + 已问过滤（Tier3 软比对）+ 信息增益贪心 + 可问性评估循环 + 阈值兜底；4 unit PASS |
+| F7 | 条件路由：should_continue | [x] | 2026-05-12 | 纯函数，三分支（cap / questions / 其他）；4 unit PASS（含不修改 State 验证） |
+| F8 | 节点 ⑥⑦：追问循环 | [x] | 2026-05-12 | ⑥a 自由文本生成 + ⑥b interrupt 等待 + ⑦ structured 解析（三类回答 + 维度回填 + present_illness 追加）；5 unit PASS |
+| F9 | 节点 ⑧⑨：检查循环 | [x] | 2026-05-12 | ⑧a 自由文本检查推荐 + ⑧b interrupt 等待 + ⑨ 复用 report_parser（全局 report_index 重映射）；4 unit PASS |
+| F10 | 节点 ⑩：diagnose | [x] | 2026-05-12 | Step-1 cap 短路 + Step0 reranker（已有 fallback）+ Step0.5 父块扩展 + 三步 LLM 链（EvidenceSheet / DiagnosisRanking / DiagnosisOutput）+ 任一步失败兜底 insufficient + failure_reason + last_diagnose_prompt/raw_output 写入；5 unit PASS（覆盖 spec §8.3 F10 五条路径） |
+| F11 | 条件路由：diagnose_router | [x] | 2026-05-12 | 纯函数：need_exam 且 exam_round<MAX → recommend_exam；否则 → safety_gate；5 unit PASS |
+| F12 | 节点 ⑪：safety_gate | [x] | 2026-05-12 | 规则层（allergy/pregnancy 直接抽取，spec §4.1.2 ⑪ TODO 重构方向待 B 阶段药品规则表落地）+ LLM 兜底（高安全级，失败保守追加通用警告）；4 unit PASS |
+| F13 | 节点 ⑫⑬：建议与输出 | [x] | 2026-05-12 | ⑫ generate_advice（failure_reason 三类对应 risk_warnings 提示）+ ⑬ format_response（失败兜底静态模板）；5 unit PASS |
+| F14 | StateGraph 编排 | [x] | 2026-05-12 | `src/agent/graph.py` 注册 16 节点 + 2 条件边；`build_app()` 默认 InMemorySaver；2 unit PASS（节点全 + compile 通过） |
+| F15 | 全工作流集成测试 | [x] | 2026-05-12 | 2 集成测试：正常 confirmed 全链路 + followup 触顶兜底全链路；interrupt resume 路径留 J 阶段 |
 
 ### 阶段 G：API 层与权限系统
 
 | 编号 | 任务名称 | 状态 | 完成日期 | 备注 |
 |------|---------|------|---------|------|
-| G1 | FastAPI 应用骨架 | [ ] | | |
-| G2 | JWT 认证中间件 | [ ] | | |
+| G1 | FastAPI 应用骨架 | [x] | 2026-05-12 | `src/api/app.py::create_app()` 工厂 + 模块级 `app` uvicorn 入口;`Instrumentator` 接入 `/metrics`(`excluded_handlers=["/healthz", "/readyz", "/metrics"]` 防自污染,§5.2.1 ②);`src/api/routes/__init__.py::register_routers(app)` 集中挂载点(G2-G6 / H8 注释占位,目前 noop);8 unit smoke PASS(/ 404、/metrics 200 + `http_requests_total`/`http_request_duration_seconds` family、/metrics 自身不被采集、/healthz /readyz NOT-IN-SCOPE 锁 404、register_routers idempotent);活 uvicorn 进程 curl 验通 |
+| G2 | JWT 认证中间件 | [x] | 2026-05-12 | `src/api/middleware/auth_middleware.py`:bcrypt 5.x `hash_password`/`verify_password` + PyJWT HS256 `encode_access_token`/`decode_access_token` + `get_current_user` Depends + `require_role(*roles)` 工厂(403 守卫,误用空参 ValueError);`src/api/schemas/auth_schema.py` Pydantic `RegisterRequest`(`Literal["patient","admin"]` 防 doctor 误传)/`LoginRequest`/`TokenResponse`/`UserOut`;`src/api/routes/auth.py` 3 端点(`POST /auth/register` 201 + IntegrityError → 409 + `POST /auth/login`(密码错与用户不存在共享 401 防枚举)+ `GET /auth/me` 不打 DB);14 unit(bcrypt salt 不等、verify 异常哈希 False、JWT roundtrip + 过期/伪造/缺 sub 全 401、require_role 三场景)+ 15 integration(端点闭环 + bcrypt 哈希入库验证 + 临时 admin-only 路由验角色守卫)= 29 PASS;活 uvicorn curl 验通 |
 | G3 | 限流中间件 | [ ] | | |
 | G4 | 问诊接口 | [ ] | | |
 | G5 | 患者信息接口 | [ ] | | |

@@ -631,7 +631,7 @@ flowchart TD
     BRANCH -->|是| END2["终止（无需向量化）"]
     BRANCH -->|否（子块）| S2
 
-    S2["<b>Step 2: Milvus Upsert（批量）</b><br/>- 以 chunk_id 确定性派生向量记录 ID：<br/>&ensp;{chunk_id}_original / {chunk_id}_summary /<br/>&ensp;{chunk_id}_question_0 / {chunk_id}_question_1 / ...<br/>- 批量 Upsert 到 docs_collection"]
+    S2["<b>Step 2: Milvus Upsert（批量）</b><br/>- 以 chunk_id 确定性派生向量记录 ID：<br/>&ensp;{chunk_id} (original) / {chunk_id}_summary /<br/>&ensp;{chunk_id}_q0 / {chunk_id}_q1 / ...<br/>- 派生规则与字段定义见 config/milvus_schema.py:119 + src/rag/ingestion/embedding.py:112<br/>- 批量 Upsert 到 docs_collection"]
     S2 -->|成功| S3
     S2 -->|失败| S2a
 
@@ -739,7 +739,7 @@ Final_Score(d) = Σ  1 / (k + rank_i(d)),    k = 60
 **matched_text 取值规则**:
 - `vector_type='original'`:取 `chunks.chunk_raw_text`(等价 Milvus payload `original_content`)
 - `vector_type='summary'`:取 `chunks.summary`
-- `vector_type='question'`:从 Milvus vector ID(`{chunk_id}_question_N`,见 §3.1.6.2)解出 N,取 `chunks.hypothetical_questions[N]`
+- `vector_type='question'`:从 Milvus vector ID(`{chunk_id}_q{n}`,见 §3.1.6.2 + config/milvus_schema.py:119)解出 n,取 `chunks.hypothetical_questions[n]`
 
 聚合后按 `rrf_score` 降序取 Top-K,**Top-K 仍为 K 个唯一 source_chunk_id**(结构去重不变),但 `vector_hits` 副载荷保留多路命中证据,供 §3.2.3 Context 扩展按命中向量类型决定附加上下文(命中文本回带 + 反查链)。
 

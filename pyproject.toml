@@ -38,6 +38,8 @@ dependencies = [
 
     # Auth(阶段 G2)
     "pyjwt>=2.8",
+    "bcrypt>=4.1",                         # 密码哈希(spec §2.4.5 users.password 是哈希后)
+    "email-validator>=2.2",                # pydantic EmailStr 依赖
 
     # 工具
     "python-dotenv>=1.0",
@@ -64,8 +66,11 @@ ingestion = [
 ]
 
 [tool.uv]
-# 默认 PyPI + PyTorch 官方 cu126 索引(Blackwell 兼容)
-extra-index-url = ["https://download.pytorch.org/whl/cu126"]
+# 默认 PyPI + PyTorch 官方 cu128 索引(Blackwell sm_120 真兼容)
+# 注:cu126 wheel 编译时 GPU arch 列表只到 sm_90,RTX 5070 Ti (sm_120) 加载会
+# "no kernel image available";Blackwell 必须 cu128+ wheel,跟系统 CUDA toolkit 无关
+# (PyTorch wheel 自带 runtime,不读 nvcc)
+extra-index-url = ["https://download.pytorch.org/whl/cu128"]
 
 [build-system]
 requires = ["hatchling"]
