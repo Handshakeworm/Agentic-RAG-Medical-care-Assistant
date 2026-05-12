@@ -1714,7 +1714,7 @@ flowchart TD
     BRANCH -->|是| END2["终止（无需向量化）"]
     BRANCH -->|否（子块）| S2
 
-    S2["<b>Step 2: Milvus Upsert（批量）</b><br/>- 以 chunk_id 确定性派生向量记录 ID：<br/>&ensp;{chunk_id}_original / {chunk_id}_summary /<br/>&ensp;{chunk_id}_question_0 / {chunk_id}_question_1 / ...<br/>- 批量 Upsert 到 docs_collection"]
+    S2["<b>Step 2: Milvus Upsert（批量）</b><br/>- 以 chunk_id 确定性派生向量记录 ID：<br/>&ensp;{chunk_id} (original) / {chunk_id}_summary /<br/>&ensp;{chunk_id}_q0 / {chunk_id}_q1 / ...<br/>- 派生规则与字段定义见 config/milvus_schema.py:119 + src/rag/ingestion/embedding.py:112<br/>- 批量 Upsert 到 docs_collection"]
     S2 -->|成功| S3
     S2 -->|失败| S2a
 
@@ -1822,7 +1822,7 @@ Final_Score(d) = Σ  1 / (k + rank_i(d)),    k = 60
 **matched_text 取值规则**:
 - `vector_type='original'`:取 `chunks.chunk_raw_text`(等价 Milvus payload `original_content`)
 - `vector_type='summary'`:取 `chunks.summary`
-- `vector_type='question'`:从 Milvus vector ID(`{chunk_id}_question_N`,见 §3.1.6.2)解出 N,取 `chunks.hypothetical_questions[N]`
+- `vector_type='question'`:从 Milvus vector ID(`{chunk_id}_q{n}`,见 §3.1.6.2 + config/milvus_schema.py:119)解出 n,取 `chunks.hypothetical_questions[n]`
 
 聚合后按 `rrf_score` 降序取 Top-K,**Top-K 仍为 K 个唯一 source_chunk_id**(结构去重不变),但 `vector_hits` 副载荷保留多路命中证据,供 §3.2.3 Context 扩展按命中向量类型决定附加上下文(命中文本回带 + 反查链)。
 
@@ -4010,12 +4010,12 @@ flowchart TD
 
 | 编号 | 任务名称 | 状态 | 完成日期 | 备注 |
 |------|---------|------|---------|------|
-| E1 | 查询预处理（分路构建） | [ ] | | |
-| E2 | Sparse Retriever（Milvus BM25） | [ ] | | |
-| E3 | Dense Retriever（单次 ANN） | [ ] | | |
-| E4 | 单阶段多路 RRF 融合 + 多向量聚合 | [ ] | | |
-| E5 | Reranker 精排 + 回退（diagnose ⑩ 前置） | [ ] | | |
-| E6 | 元数据过滤 | [ ] | | |
+| E1 | 查询预处理（分路构建） | [x] | 2026-05-12 | `src/rag/retrieval/query_processing.py` 三函数(`expand_aliases` / `build_sparse_query_bag` / `build_sparse_queries`):长度 ≤ 1 别名过滤、跨 concept 去重、空词袋自动跳过(spec §3.2.1 Step 2 边界);`terms_collection.py` 加 `query_aliases_by_concept_id` scalar 查询接口(字母序确定性,幂等);15 unit + 5 integration PASS(临时 terms_collection 隔离生产 4w 行数据)。LLM 调用与 prompt 由 F3 build_query 节点持有(spec §3.2.1 + §8.3 E1 任务说明边界)。**待 D1 补**:当前 D2 每 ICD 编码只灌 1 别名(=preferred_term 自身),词袋实际单 token,等 CMeSH 等口语词表灌库后多别名词袋效果才完整 |
+| E2 | Sparse Retriever（Milvus BM25） | [x] | 2026-05-12 | `src/rag/retrieval/sparse_retriever.py::search_sparse_routes` 高阶函数:循环调底层 `docs_collection.search_sparse_bm25`,N 个维度 = N 次 BM25(顺序保留);默认 top_k = `settings.agent_limits.RETRIEVE_TOP_N`(spec gap:E2 说"返回 Top-N"未明示数字,按 §9.7 取齐);`source_id_filter` pre-filter 透传(对接 E6);6 unit + 4 integration PASS(临时 docs_collection 隔离,验证多维度命中、跨维度共命中、source pre-filter、空入入兜底) |
+| E3 | Dense Retriever（单次 ANN） | [x] | 2026-05-12 | `src/rag/retrieval/dense_retriever.py::search_dense_route(dense_query, top_k=None, source_id_filter=None)`:文本经 `get_embedding_model().encode_one` → `docs_collection.search_dense`,不传 vector_type_filter(spec §3.2.2 三类向量均参与召回);默认 top_k = `settings.agent_limits.RETRIEVE_TOP_N`;6 unit + 3 integration PASS(真 Embedding 8B INT8 + 真 Milvus 临时 collection,3 条临床主题 chunk 验证语义命中:右上腹剧痛 query 命中胆囊炎 chunk Top-1) |
+| E4 | 单阶段多路 RRF 融合 + 多向量聚合 | [x] | 2026-05-12 | `src/rag/retrieval/fusion.py::fuse_routes(dense, sparse_routes, top_n, rrf_k=60, pg_chunk_lookup)`:5 步流程(record-level RRF 求和 → chunk-level 多向量聚合 → top_n 截断 → PG 仅对存活 chunk 回查 summary/hypothetical_questions → 装配 vector_hits);matched_text 三类规则按 spec §3.2.2 行 1822-1825(original 直读 hit / summary+question 走 PG lookup);question vector ID 解析 `_q{n}` 后缀(spec §3.1.6.2 + §3.2.2 已与代码对齐统一为 `_q{n}`);PG lookup 注入设计便于单测 mock,只对截断存活且需 summary/question 的 chunk 调用节省 IO;21 unit PASS(覆盖 RRF 公式/跨路求和/多向量聚合/top_n 截断/同分字母序 tie-break/vector_hits 形态/matched_text 三类/lookup 调用优化/边界) |
+| E5 | Reranker 精排 + 回退（diagnose ⑩ 前置） | [x] | 2026-05-12 | `src/rag/retrieval/reranker.py::rerank_with_fallback(query, documents, top_k, timeout_sec=10, enabled=True, reranker=None)` 高阶函数:用 ThreadPoolExecutor 实现 best-effort 超时;**spec §3.2.3 强约束 - 不抛异常**(模型异常 / 超时 / disabled 三种 fallback 路径都返回原序 idx 列表);返回 `list[int]` 解耦 candidate_chunks 形态;9 unit PASS(正常排序/top_k 截断/disabled 跳过/空入入/异常 fallback/超时 fallback/timeout=None 不限时)。底层 `Reranker` / `get_reranker` 沿用 B7 实现 |
+| E6 | 元数据过滤 | [x] | 2026-05-12 | Pre-filter 已在 E2/E3 通过 `source_id_filter` 透传到底层 Milvus(覆盖 spec §3.2.3 "硬约束在底层索引提前过滤"),本任务补 Post-filter 框架:`src/rag/retrieval/metadata_filter.py::apply_post_filters(candidates, predicates)` 接受 predicate list(签名 `dict → bool|None`),全部 True/None 才保留;**spec §3.2.3 'missing → include' 宽松策略**实现:返回 None / 抛 KeyError/AttributeError/TypeError 视为通过,其他异常冒泡;`source_id_in_allowlist` factory 演示常用 predicate 模式;14 unit PASS(空 predicates / AND 语义 / 三类 missing 异常宽松 / 其他异常冒泡 / 顺序保留 / factory 行为) |
 
 ### 阶段 F：Agent 工作流
 
@@ -4888,7 +4888,7 @@ async def diagnose(req: DiagnoseRequest,
 | `RETRIEVE_TOP_N` | `200` | RRF 融合后 Top-N 截断（送入 ④ `extract_symptoms` 与 ⑩ Step 0 Cross-Encoder） | ③ `retrieve`（§4.1.2）/ §3.2.2 |
 | `ASKABLE_GAIN_THRESHOLD` | `0.15` | 可问症状信息增益阈值（低于此值的症状候选从 `followup_questions` 中剔除） | ⑤ `select_discriminative_symptom`（§4.1.2）|
 | `ENTITY_LINKING_TIER2_THRESHOLD` | `0.92` | Tier 2 向量检索相似度截断（terms_collection 查询 Top-5 中，Cosine Similarity ≥ 此值才视为命中） | ④ `extract_symptoms` Tier 2（§4.1.2，§2.4.6）|
-| `RERANKER_CUTOFF_LAYERS` | `None`（表示全层 28） | Cross-Encoder BGE-Reranker-v2-minicpm-layerwise 提前退出的层数；`None` = 不截断 | ⑩ Step 0 / Reranker 客户端（§2.3，§3.2.3）|
+| `RERANKER_CUTOFF_LAYERS` | `None`（=全层不截断；模型 layerwise 完整深度，BGE-Reranker-v2-minicpm-layerwise 为 40 层） | Cross-Encoder layerwise early-exit 截断层数；`None` = 跑满全层 | ⑩ Step 0 / Reranker 客户端（§2.3，§3.2.3）|
 | `RETRIEVE_PARENT_FIGURE_CAP` | `5` | Context 扩展规则 3:父块在 LLM context 里能带的同节图表数封顶（`chunk_type ∈ {table, figure}` 计数;按 `relative_chunk_index` 升序保留前 K 个） | ⑩ Step 0 后 / Context 扩展(§3.2.3)|
 
 ### 9.7.2 定义位置与类型

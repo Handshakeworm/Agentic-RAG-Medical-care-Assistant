@@ -18,17 +18,21 @@ import pytest
 
 
 def test_agent_limits_initial_values_match_spec_9_7_1() -> None:
-    """DEV_SPEC §9.7.1 常量清单的 7 个初始值必须与 spec 一字不差。"""
-    from config.settings import settings
+    """DEV_SPEC §9.7.1 常量清单的 7 个初始值必须与 spec 一字不差。
 
-    al = settings.agent_limits
-    assert al.MAX_FOLLOWUP_ROUNDS == 8
-    assert al.MAX_EXAM_ROUNDS == 3
-    assert al.MAX_FOLLOWUP_QUESTIONS == 5
-    assert al.RETRIEVE_TOP_N == 200
-    assert al.ASKABLE_GAIN_THRESHOLD == 0.15
-    assert al.ENTITY_LINKING_TIER2_THRESHOLD == 0.92
-    assert al.RERANKER_CUTOFF_LAYERS is None  # 全 28 层
+    锁的是 Pydantic Field 的 **class default**(spec 文本契约),不是 settings
+    实例的 effective value(后者会被 .env / 进程 env 覆盖,见 §9.7.4)。
+    """
+    from config.settings import AgentLimitsSettings
+
+    fields = AgentLimitsSettings.model_fields
+    assert fields["MAX_FOLLOWUP_ROUNDS"].default == 8
+    assert fields["MAX_EXAM_ROUNDS"].default == 3
+    assert fields["MAX_FOLLOWUP_QUESTIONS"].default == 5
+    assert fields["RETRIEVE_TOP_N"].default == 200
+    assert fields["ASKABLE_GAIN_THRESHOLD"].default == 0.15
+    assert fields["ENTITY_LINKING_TIER2_THRESHOLD"].default == 0.92
+    assert fields["RERANKER_CUTOFF_LAYERS"].default is None  # 全 40 层(模型 layerwise 完整深度)
 
 
 # ────────────────────────────────────────────────────────────────────────────

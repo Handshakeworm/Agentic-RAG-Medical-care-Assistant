@@ -10,9 +10,11 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_reranker_layerwise_ranking():
+    """cutoff_layer 走 settings.agent_limits.RERANKER_CUTOFF_LAYERS(§9.7),
+    .env 里 AGENT_RERANKER_CUTOFF_LAYERS=28 → 实际 layerwise early-exit。"""
     from src.rag.retrieval.reranker import Reranker
 
-    reranker = Reranker(cutoff_layer=28)
+    reranker = Reranker()
     query = "糖尿病患者的饮食注意事项"
     documents = [
         "糖尿病患者应控制碳水化合物摄入，避免高糖食物。",

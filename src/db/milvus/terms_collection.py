@@ -124,6 +124,29 @@ def search_aliases(
     return list(deduped.values())[:top_k]
 
 
+def query_aliases_by_concept_id(concept_id: str) -> list[str]:
+    """按 concept_id 标量查询返回该概念的全部别名,按字母序排列。
+
+    DEV_SPEC §3.2.1 Step 2 术语扩展用:以已规范化术语的 concept_id 为主键,
+    查出该概念下的全部别名(含口语、缩写、英文),供 query_processing.py 拼
+    BM25 词袋。
+
+    职责边界:本接口只做无损的数据访问 —— 不存在的 concept_id 返回 [],
+    长度过滤(spec 要求 ≤1 字符过短别名剔除)由调用方
+    `src/rag/retrieval/query_processing.py` 处理,避免数据访问层带语义判断。
+
+    确定性:按 alias 字母序排序保证同 concept_id 多次调用结果稳定(项目级幂等约定)。
+    """
+    coll = ensure_terms_collection()
+    coll.load()
+
+    rows = coll.query(
+        expr=f'concept_id == "{concept_id}"',
+        output_fields=["alias"],
+    )
+    return sorted(r["alias"] for r in rows)
+
+
 def count_aliases() -> int:
     coll = ensure_terms_collection()
     coll.flush()

@@ -81,11 +81,13 @@ class EmbeddingSettings(BaseSettings):
 
 
 class RerankerSettings(BaseSettings):
+    """注:cutoff layers 走 §9.7 `agent_limits.RERANKER_CUTOFF_LAYERS`(单一来源,
+    Pydantic int|None,None=全 40 层),不在本段定义。"""
+
     model_config = SettingsConfigDict(env_prefix="RERANKER_", env_file=".env", extra="ignore")
 
     MODEL_PATH: str = "/data/reranker-model/BAAI--bge-reranker-v2-minicpm-layerwise"
     DEVICE: str = "cuda"
-    CUTOFF_LAYER: int = 28  # 全 40 层,28 为质量/速度均衡点
     TIMEOUT_SECONDS: int = 5
 
 
