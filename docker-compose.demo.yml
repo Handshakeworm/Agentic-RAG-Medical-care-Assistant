@@ -1,0 +1,26 @@
+# docker-compose.demo.yml — G7 演示用 override(DEV_SPEC §8.4 G7)。
+#
+# 用途:K 阶段 Dockerfile.api 完工前,演示时让 host 跑 uvicorn,nginx 容器
+# 反代到 host。原 docker-compose.yml + nginx.conf 完全不动,K 阶段无缝继承。
+#
+# 用法:
+#   1. host 跑 uvicorn:
+#        uvicorn src.api.app:app --host 0.0.0.0 --port 8000
+#   2. 起 nginx + 依赖:
+#        docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d nginx
+#   3. 验证:
+#        curl http://localhost:80/metrics
+#        curl http://localhost:80/auth/me  (应返 401 缺 token)
+#
+# 关键技巧:
+# - depends_on: !reset [] 把主 compose 里 "依赖 api healthy" 的硬约束清掉
+#   (K 阶段做完 Dockerfile.api 后用主 compose 跑,自动恢复依赖)
+# - extra_hosts api:host-gateway 让 nginx 容器内 "api" 这个 hostname 解析到
+#   宿主机网关,nginx.conf 里 `server api:8000` 不需要改,转发到 host:8000
+#   宿主机 uvicorn
+
+services:
+  nginx:
+    depends_on: !reset []
+    extra_hosts:
+      - "api:host-gateway"
