@@ -31,6 +31,7 @@ class AgentLimitsSettings(BaseSettings):
     ASKABLE_GAIN_THRESHOLD: float = Field(0.15, description="可问症状信息增益阈值")
     ENTITY_LINKING_TIER2_THRESHOLD: float = Field(0.92, description="terms_collection 向量检索 Cosine 截断")
     RERANKER_CUTOFF_LAYERS: int | None = Field(None, description="layerwise early-exit 层数,None=全 40 层(模型自身完整深度)")
+    RETRIEVE_PARENT_FIGURE_CAP: int = Field(5, description="Context 扩展规则 3:父块在 LLM context 里能带的同节图表数封顶")
 
 
 # ────────────────────────────────────────────────────────────────────────────

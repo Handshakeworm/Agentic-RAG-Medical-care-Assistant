@@ -3,10 +3,15 @@
 执行顺序:
   Step -1  followup_round 触顶兜底短路(非 LLM,优先级最高)
   Step 0   Cross-Encoder 精排截断 + 写 last_reranked_chunks
-  Step 0.5 父块扩展(Small-to-Big)— 父块文本仅替换 prompt 中小块,不写回 State
-  Step 1   LLM #1:证据归集(EvidenceSheet)
-  Step 2   LLM #2:鉴别诊断排序(DiagnosisRanking)
-  Step 3   LLM #3:置信度校准(DiagnosisOutput)
+  Step 0.5 Context 扩展(spec §3.2.3 四规则)— 仅 prompt 用,不写回 State
+             规则 1:child → parent_chunk_id 父块全文
+             规则 2:table/figure → parent 父块全文 + 自身 image_path 截图
+             规则 3:父块 → heading_path_id 同节图表(封顶 RETRIEVE_PARENT_FIGURE_CAP)
+             规则 4:vector_hits.matched_text 作为 prompt 召回线索附加
+  Step 1   LLM #1(**vision LLM,DashScope qwen3.5-plus**):证据归集(EvidenceSheet)
+             figure 的 image_path 转 base64 作为多模态消息送入(详见 §3.2.3 LLM 路由段)
+  Step 2   LLM #2(主链 LLM,DeepSeek):鉴别诊断排序(DiagnosisRanking)
+  Step 3   LLM #3(主链 LLM):置信度校准(DiagnosisOutput)
 
 整链路兜底:任一步重试耗尽 → 立即停止,产 insufficient + failure_reason 兜底,
 prompt + raw_output 写入 State 供审计(spec §4.1.2 ⑩ 结构化输出保障 + §9.6.2)。
@@ -28,7 +33,11 @@ from src.agent.schemas.diagnosis import (
     RankedDisease,
 )
 from src.agent.state import MedicalState
-from src.agent.utils.chunks_lookup import lookup_chunk_content
+from src.agent.utils.chunks_lookup import (
+    lookup_chunk_content,
+    lookup_figures_by_heading_path,
+)
+from src.agent.utils.report_loader import load_report
 from src.common.metrics import (
     _attempts,
     _diagnose_reason,
@@ -119,35 +128,188 @@ def _rerank_and_truncate(
     return reranked, text
 
 
-def _expand_parent_chunks(reranked_chunks: list[dict], reranked_text: list[str]) -> list[str]:
-    """Step 0.5:对每个 chunk 取父块全文替换;父块缺失则保留小块原文兜底。
-    返回 list[str](与 reranked_chunks 同序),不写回 State。"""
-    chunk_ids = [c.get("source_chunk_id") for c in reranked_chunks if c.get("source_chunk_id")]
-    if not chunk_ids:
-        return reranked_text
+def _load_figure_data_uri(image_path: str | None) -> str | None:
+    """把 chunks.image_path 加载成 base64 data URI(失败返 None 不抛)。"""
+    if not image_path:
+        return None
+    try:
+        loaded = load_report(image_path)
+    except Exception as e:
+        _logger.warning("figure image load failed (%s): %s", image_path, e)
+        return None
+    if loaded.get("kind") != "image":
+        return None  # PDF 等非图(理论上不该是 figure image_path,防御性兜底)
+    return loaded.get("data_uri")
 
+
+def _build_diagnose_context(
+    reranked_chunks: list[dict], reranked_text: list[str]
+) -> dict:
+    """Step 0.5:spec §3.2.3 Context 扩展四规则,产出供 Step 1 prompt 消费的结构。
+
+    规则 1:child → parent_chunk_id 父块全文(替换 reranked_text 中的小块)
+    规则 2:table/figure 自身 → 父块全文(同规则 1)+ figure 自身截图加载
+    规则 3:父块 → heading_path_id 同节图表(封顶 RETRIEVE_PARENT_FIGURE_CAP)
+    规则 4:vector_hits.matched_text 作为召回线索 hint(去重)
+
+    去重(spec §3.2.3 末段):四条规则展开后按 chunk_id 去重,常见 case 是图表
+    chunk 直接命中(规则 2)+ 父块展开后规则 3 又拉同一图表,只留一份。
+
+    medical_statement **不进 prompt**(spec §3.2.3 规则 2/3 + §3.1.5.1 关键认知段:
+    enrichment 字段仅承担召回辅助,不作 LLM context payload)。
+
+    Returns:
+        {
+            "parent_texts": list[str],   # 与 reranked_chunks 同序;空入入返 reranked_text
+            "figures": list[dict],       # 跨规则去重后的同节 + 直接命中图表;每条:
+                                         #   chunk_id, chunk_type ("table"|"figure"),
+                                         #   chunk_raw_text, title,
+                                         #   image_data_uri: str | None  (base64 加载失败 None)
+            "vector_hints": list[str],   # 去重后的命中向量文本(matched_text);
+                                         #   matched_text 已被 parent_texts 中任一片覆盖时跳过
+        }
+    """
+    if not reranked_chunks:
+        return {"parent_texts": list(reranked_text), "figures": [], "vector_hints": []}
+
+    chunk_ids = [c.get("source_chunk_id") for c in reranked_chunks if c.get("source_chunk_id")]
     try:
         meta = lookup_chunk_content(chunk_ids)
     except Exception as e:
-        _logger.warning("chunks_lookup failed during parent expansion: %s", e)
-        return reranked_text
+        _logger.warning("chunks_lookup failed during context build: %s", e)
+        # 全规则降级:用 reranked_text 兜底,无图无 hint
+        return {
+            "parent_texts": list(reranked_text),
+            "figures": [],
+            "vector_hints": list(_dedup_vector_hints(reranked_chunks, [])),
+        }
 
-    out = []
+    # ── 规则 1 + 2:展开父块文本(与 reranked_chunks 同序)──
+    # 同时收集:① 父块 heading_path_id(给规则 3 查同节图表用)
+    #          ② 直接命中的 table/figure chunk(给规则 2 加截图 + 进 figures 列表)
+    parent_text_by_idx: list[str] = []
+    parent_heading_paths: set[str] = set()
+    direct_hit_figures: list[dict] = []
+    parent_ids_to_fetch: list[str] = []
+
     for chunk, fallback_text in zip(reranked_chunks, reranked_text):
         cid = chunk.get("source_chunk_id")
         info = meta.get(cid) if cid else None
         if not info:
-            out.append(fallback_text)
+            parent_text_by_idx.append(fallback_text)
             continue
+
+        # 规则 2 一部分:直接命中 table/figure → 记到 direct_hit_figures
+        if info.get("chunk_type") in ("table", "figure"):
+            direct_hit_figures.append(
+                {
+                    "chunk_id": cid,
+                    "chunk_type": info["chunk_type"],
+                    "chunk_raw_text": info.get("chunk_raw_text") or "",
+                    "title": info.get("title"),
+                    "image_data_uri": _load_figure_data_uri(info.get("image_path")),
+                }
+            )
+
+        # 规则 1 + 规则 2 父块替换:有 parent_chunk_id 则取父块全文
         parent_id = info.get("parent_chunk_id")
         if parent_id:
-            parent = meta.get(parent_id) or lookup_chunk_content([parent_id]).get(parent_id)
-            if parent and parent.get("chunk_raw_text"):
-                out.append(parent["chunk_raw_text"])
+            parent_ids_to_fetch.append(parent_id)
+            parent_text_by_idx.append(None)  # 占位,下一轮回填
+        else:
+            # 父块缺失或自己就是父块 → 用 chunk_raw_text 兜底
+            body = info.get("chunk_raw_text") or fallback_text
+            parent_text_by_idx.append(body)
+            if info.get("heading_path_id"):
+                parent_heading_paths.add(info["heading_path_id"])
+
+    # 一次性批量查父块
+    parent_meta: dict[str, dict] = {}
+    if parent_ids_to_fetch:
+        unique_parent_ids = list({pid for pid in parent_ids_to_fetch if pid not in meta})
+        try:
+            parent_meta = lookup_chunk_content(unique_parent_ids) if unique_parent_ids else {}
+        except Exception as e:
+            _logger.warning("parent chunks lookup failed: %s", e)
+            parent_meta = {}
+        # 合并已有 meta 里的父块
+        parent_meta = {**parent_meta, **{k: v for k, v in meta.items() if k in parent_ids_to_fetch}}
+
+    # 回填父块文本占位
+    for i, chunk in enumerate(reranked_chunks):
+        if parent_text_by_idx[i] is not None:
+            continue
+        cid = chunk.get("source_chunk_id")
+        info = meta.get(cid) if cid else None
+        parent_id = info.get("parent_chunk_id") if info else None
+        parent_info = parent_meta.get(parent_id) if parent_id else None
+        if parent_info and parent_info.get("chunk_raw_text"):
+            parent_text_by_idx[i] = parent_info["chunk_raw_text"]
+            if parent_info.get("heading_path_id"):
+                parent_heading_paths.add(parent_info["heading_path_id"])
+        else:
+            # 父块查询失败 / 内容为空 → 用小块原文兜底
+            body = (info.get("chunk_raw_text") if info else None) or reranked_text[i]
+            parent_text_by_idx[i] = body or ""
+
+    # ── 规则 3:按 heading_path_id 批量查同节图表(封顶 RETRIEVE_PARENT_FIGURE_CAP)──
+    cap = settings.agent_limits.RETRIEVE_PARENT_FIGURE_CAP
+    same_section_figures: list[dict] = []
+    if parent_heading_paths:
+        try:
+            grouped = lookup_figures_by_heading_path(parent_heading_paths, cap=cap)
+        except Exception as e:
+            _logger.warning("same-section figures lookup failed: %s", e)
+            grouped = {}
+        for figs in grouped.values():
+            for f in figs:
+                same_section_figures.append(
+                    {
+                        "chunk_id": f["chunk_id"],
+                        "chunk_type": f["chunk_type"],
+                        "chunk_raw_text": f.get("chunk_raw_text") or "",
+                        "title": f.get("title"),
+                        "image_data_uri": _load_figure_data_uri(f.get("image_path")),
+                    }
+                )
+
+    # ── 去重(spec §3.2.3 末段):跨规则 2/3 按 chunk_id 去重 ──
+    seen: set[str] = set()
+    merged_figures: list[dict] = []
+    for f in (*direct_hit_figures, *same_section_figures):
+        cid = f.get("chunk_id")
+        if not cid or cid in seen:
+            continue
+        seen.add(cid)
+        merged_figures.append(f)
+
+    # ── 规则 4:vector_hits matched_text 提示(去重,且与父块原文不重叠才附加)──
+    vector_hints = list(_dedup_vector_hints(reranked_chunks, parent_text_by_idx))
+
+    return {
+        "parent_texts": parent_text_by_idx,
+        "figures": merged_figures,
+        "vector_hints": vector_hints,
+    }
+
+
+def _dedup_vector_hints(
+    reranked_chunks: list[dict], parent_texts: list[str]
+) -> list[str]:
+    """规则 4:收集 vector_hits.matched_text;已被 parent_texts 任一片覆盖的整体跳过。"""
+    parent_joined = "\n".join(t for t in parent_texts if t)
+    out: list[str] = []
+    seen: set[str] = set()
+    for chunk in reranked_chunks:
+        for vh in chunk.get("vector_hits") or []:
+            mt = (vh.get("matched_text") or "").strip()
+            if not mt or mt in seen:
                 continue
-        # 父块缺失或自己就是父块 → 用小块原文兜底
-        body = info.get("chunk_raw_text") or info.get("medical_statement") or fallback_text
-        out.append(body or fallback_text)
+            if mt in parent_joined:
+                seen.add(mt)
+                continue  # 已被父块原文覆盖
+            seen.add(mt)
+            out.append(mt)
     return out
 
 
@@ -156,14 +318,19 @@ def _expand_parent_chunks(reranked_chunks: list[dict], reranked_text: list[str])
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def _diagnose_step(step_num: int, chain, prompt: str, schema_name: str):
-    """单步 LLM 调用 + 6 指标埋点;不在此处兜底,异常上抛由顶层捕获。"""
+def _diagnose_step(step_num: int, chain, prompt_or_messages, schema_name: str):
+    """单步 LLM 调用 + 6 指标埋点;不在此处兜底,异常上抛由顶层捕获。
+
+    Args:
+        prompt_or_messages: Step 1 走多模态时为 `list[BaseMessage]`(含图),
+            Step 2/3 为纯文本 `str`;LangChain `chain.invoke` 对两种入参都支持。
+    """
     node = f"diagnose_step{step_num}"
     _attempts.labels(node=node, schema=schema_name).inc()
     t0 = time.perf_counter()
     try:
         return chain.invoke(
-            prompt,
+            prompt_or_messages,
             config={
                 "callbacks": [retry_observer],
                 "metadata": {"node": node, "schema": schema_name},
@@ -205,18 +372,25 @@ def diagnose(state: MedicalState) -> dict:
         state.candidate_chunks, rerank_query, rerank_top_k
     )
 
-    # ─── Step 0.5: 父块扩展(仅 prompt 用,不写回 State)───
-    expanded_text = _expand_parent_chunks(reranked_chunks, reranked_text)
+    # ─── Step 0.5: Context 扩展(spec §3.2.3 四规则,仅 prompt 用,不写回 State)───
+    ctx = _build_diagnose_context(reranked_chunks, reranked_text)
 
     # ─── Step 1-3 链式调用,任一步失败立即停止 ───
-    llm = get_llm()
-    evidence_chain = llm.with_structured_output(
+    # Step 1 走 vision LLM(spec §3.2.3 LLM 路由 + §9.3 diagnose Step 1 行);
+    # Step 2/3 走主链 DeepSeek
+    vision_llm = get_llm(
+        model=settings.llm.VISION_MODEL_NAME,
+        base_url=settings.llm.VISION_BASE_URL,
+        api_key=settings.llm.VISION_API_KEY,
+    )
+    main_llm = get_llm()
+    evidence_chain = vision_llm.with_structured_output(
         EvidenceSheet, method="json_mode"
     ).with_retry(stop_after_attempt=3)
-    ranking_chain = llm.with_structured_output(
+    ranking_chain = main_llm.with_structured_output(
         DiagnosisRanking, method="json_mode"
     ).with_retry(stop_after_attempt=3)
-    calibration_chain = llm.with_structured_output(
+    calibration_chain = main_llm.with_structured_output(
         DiagnosisOutput, method="json_mode"
     ).with_retry(stop_after_attempt=3)
 
@@ -228,19 +402,23 @@ def diagnose(state: MedicalState) -> dict:
     last_raw_output: str | None = None
 
     try:
-        # Step 1
+        # Step 1(vision LLM,多模态 messages)
         current_step = 1
-        evidence_prompt = build_evidence_assembly_prompt(
-            reranked_chunks_text=expanded_text,
+        evidence_messages, evidence_prompt_text = build_evidence_assembly_prompt(
+            parent_texts=ctx["parent_texts"],
+            figures=ctx["figures"],
+            vector_hints=ctx["vector_hints"],
             confirmed_symptoms=state.confirmed_symptoms,
             denied_symptoms=state.denied_symptoms,
             slots=slots_dict,
             history_summary=history_summary,
             report_findings=state.report_findings,
         )
-        last_prompt = evidence_prompt
+        # last_prompt 存文本镜像(§9.6 final_prompt 是 str 字段),
+        # invoke 喂 multimodal messages
+        last_prompt = evidence_prompt_text
         evidence: EvidenceSheet = _diagnose_step(
-            1, evidence_chain, evidence_prompt, "EvidenceSheet"
+            1, evidence_chain, evidence_messages, "EvidenceSheet"
         )
         last_raw_output = evidence.model_dump_json()
 

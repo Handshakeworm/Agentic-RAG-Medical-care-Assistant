@@ -170,3 +170,40 @@ def _make_step_failure_test(step_num: int):
 test_step1_failure = _make_step_failure_test(1)
 test_step2_failure = _make_step_failure_test(2)
 test_step3_failure = _make_step_failure_test(3)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 路径 6:vision LLM 路由(spec §3.2.3 LLM 路由 + §9.3 diagnose Step 1)
+# ────────────────────────────────────────────────────────────────────────────
+
+
+@patch("src.agent.nodes.diagnose.rerank_with_fallback", return_value=[0])
+@patch(
+    "src.agent.nodes.diagnose.lookup_chunk_content",
+    return_value={"c1": {"chunk_raw_text": "x", "parent_chunk_id": None}},
+)
+@patch("src.agent.nodes.diagnose.get_llm")
+def test_step1_uses_vision_llm_step23_use_main_llm(mock_llm, _lookup, _rerank):
+    """spec §3.2.3 LLM 路由:Step 1 走 vision LLM(传 vision 三件套),
+    Step 2/3 走主链(无参数 get_llm())。"""
+    from config.settings import settings
+    from src.agent.nodes.diagnose import diagnose
+
+    mock_chain = mock_llm.return_value.with_structured_output.return_value.with_retry.return_value
+    mock_chain.invoke.side_effect = [_ok_evidence(), _ok_ranking(), _ok_output()]
+
+    s = _state_for_diagnose()
+    diagnose(s)
+
+    # 验证 get_llm 被调用了至少 2 次:一次 vision 一次 main
+    call_args_list = mock_llm.call_args_list
+    assert len(call_args_list) >= 2
+
+    # 第 1 次:vision LLM 调用(传 vision 三件套关键字参数)
+    vision_call = call_args_list[0]
+    assert vision_call.kwargs.get("model") == settings.llm.VISION_MODEL_NAME
+    assert vision_call.kwargs.get("base_url") == settings.llm.VISION_BASE_URL
+
+    # 第 2 次:主链 LLM 调用(无 model/base_url/api_key 覆盖)
+    main_call = call_args_list[1]
+    assert main_call.kwargs.get("model") is None or main_call.kwargs == {}

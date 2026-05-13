@@ -9,7 +9,9 @@
   类型 —— 调用方从 state 抽字段后传入,prompt 模块不感知 state 对象
 - prompt 内联 schema 字段说明,降低对 §9.5 的查阅依赖;LLM 自己从
   `with_structured_output` 拿严格 schema,prompt 文本作为补充语义提示
-- 多模态调用(① .5 / ⑨)的 prompt 仍是文本提示,图片/PDF 通过消息附件传入
+- 多模态调用(① .5 / ⑨ / ⑩ Step 1)返回 `(messages, prompt_text)` 二元组:
+  `messages: list[BaseMessage]` 供 chain.invoke 消费(含图);
+  `prompt_text: str` 供 §9.6 `final_prompt` 审计存档(纯文本镜像)
 
 每个 prompt 都尽量短小聚焦:同一节点不同 step 的 prompt 各自独立,避免一个
 "上帝 prompt"什么都管。
@@ -18,6 +20,8 @@ from __future__ import annotations
 
 import json
 from typing import Any
+
+from langchain_core.messages import BaseMessage, HumanMessage
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -396,17 +400,43 @@ def build_recommend_exam_prompt(
 
 
 def build_evidence_assembly_prompt(
-    reranked_chunks_text: list[str],
+    *,
+    parent_texts: list[str],
+    figures: list[dict],
+    vector_hints: list[str],
     confirmed_symptoms: list[str],
     denied_symptoms: list[str],
     slots: dict[str, Any],
     history_summary: str,
     report_findings: list[dict],
-) -> str:
-    """⑩ Step 1:从 reranked_chunks + 各类证据归集 EvidenceSheet,**不做概率判断**。"""
+) -> tuple[list[BaseMessage], str]:
+    """⑩ Step 1(spec §3.2.3 + §9.3 vision LLM 行):证据归集 EvidenceSheet,**不做概率判断**。
+
+    返回多模态 messages + 纯文本 prompt(后者供 §9.6 final_prompt 审计存档)。
+    figure 的 image_data_uri 作为 image_url 消息块附加;medical_statement 已在
+    context builder 中排除,**不进 prompt**(spec §3.1.5.1 + §3.2.3 关键认知)。
+
+    Args:
+        parent_texts: 规则 1/2 展开后的父块文本列表(与 reranked_chunks 同序)
+        figures: 规则 2/3 去重后的图表 chunk 列表,每条含 chunk_raw_text + image_data_uri
+        vector_hints: 规则 4 vector_hits matched_text(已去重 + 已与父块原文去重)
+        confirmed_symptoms / denied_symptoms / slots / history_summary / report_findings:
+            患者多维度证据
+    """
     chunks_block = "\n".join(
-        f"[chunk {i}] {c[:300]}" for i, c in enumerate(reranked_chunks_text[:8])
+        f"[chunk {i}] {(c or '')[:300]}" for i, c in enumerate(parent_texts[:8])
     ) or "(无)"
+
+    # 图表块:仅放文本(table=html / figure=caption + footnote);截图走多模态消息单独附加
+    if figures:
+        figures_block = "\n".join(
+            f"[figure {i} | {f['chunk_type']}] {(f.get('chunk_raw_text') or '')[:300]}"
+            for i, f in enumerate(figures)
+        )
+    else:
+        figures_block = "(无)"
+
+    hints_block = "\n".join(f"- {h[:200]}" for h in vector_hints[:8]) or "(无)"
 
     confirmed_block = "、".join(confirmed_symptoms) or "(无)"
     denied_block = "、".join(denied_symptoms) or "(无)"
@@ -415,11 +445,17 @@ def build_evidence_assembly_prompt(
     )
     reports_block = json.dumps(report_findings[:5], ensure_ascii=False)[:1500]
 
-    return f"""你是医学证据归集助手。请从下面的医学文献片段 + 患者证据中,**只做事实级别的证据归集**——
+    prompt_text = f"""你是医学证据归集助手。请从下面的医学文献片段 + 患者证据中,**只做事实级别的证据归集**——
 列出每个候选疾病的支持/反对证据,但**不要做概率判断**(那是 Step 2 的事)。
 
-【医学文献片段(已精排,Top-K)】
+【医学文献片段(精排父块,Top-K)】
 {chunks_block}
+
+【同节图表 chunk(table 见 html / figure 见随附截图)】
+{figures_block}
+
+【召回线索(matched_text,辅助判断 chunk 被召回的语义焦点;非权威医学事实)】
+{hints_block}
 
 【患者已确认症状】{confirmed_block}
 【患者已否认症状】{denied_block}
@@ -429,7 +465,7 @@ def build_evidence_assembly_prompt(
 
 【输出 EvidenceSheet.candidates,每个候选包含】
 - disease:候选疾病名
-- supporting:支持证据(症状匹配)
+- supporting:支持证据(症状匹配 / 图表数据 / 检查报告 / 病史)
 - opposing:反对证据(否认症状/阴性发现)
 - history_factors:每项 {{item, direction(increase/decrease/neutral)}}
 - slot_relevance:每项 {{slot, value, impact}}(现病史维度对该候选的诊断意义)
@@ -437,6 +473,21 @@ def build_evidence_assembly_prompt(
 
 至少给出 1 个候选;若文献片段都不相关,也要给一个候选(disease="待进一步评估"),
 supporting/opposing 留空,后续 Step 2 会判定为 insufficient。"""
+
+    # 多模态消息组装:base text + 每张可加载的 figure 截图作 image_url 块
+    content: list[dict] = [{"type": "text", "text": prompt_text}]
+    for f in figures:
+        uri = f.get("image_data_uri")
+        if uri:
+            content.append({"type": "image_url", "image_url": {"url": uri}})
+
+    if len(content) == 1:
+        # 没图就直接 str content,避免 provider 把 list 当多模态特殊处理
+        messages: list[BaseMessage] = [HumanMessage(content=prompt_text)]
+    else:
+        messages = [HumanMessage(content=content)]
+
+    return messages, prompt_text
 
 
 def build_diagnosis_ranking_prompt(

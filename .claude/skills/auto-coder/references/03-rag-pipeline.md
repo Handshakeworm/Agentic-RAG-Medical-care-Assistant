@@ -778,19 +778,19 @@ Cross-Encoder 精排截断出 Top-K chunk 后,在构建 LLM prompt 前对每个 
 - 若 `parent_chunk_id IS NULL`,保留小块原文兜底
 
 **规则 2:图表 chunk → 父块**(章节上下文,见 §3.1.2):
-- 命中 `chunk_type ∈ {table, figure}` 的图表 chunk,其 `chunk_raw_text`(table=html+caption+footnote / figure=caption+footnote)+ `medical_statement`(LLM 陈述)+ `image_path` 已在同一行直读可得
+- 命中 `chunk_type ∈ {table, figure}` 的图表 chunk,其 `chunk_raw_text`(table=html+caption+footnote / figure=caption+footnote)+ `image_path` 已在同一行直读可得
 - **按 `parent_chunk_id` 回查所在节父块,把父块全文合并进 context**——保证图表命中后 LLM 能看到所属章节的临床上下文(否则只看图本身可能不知道是哪个病的什么阶段)
-- 多模态 LLM 可按 `image_path` 加载截图作为视觉输入(可选,看运行时模型选型;命中 figure 时默认喂截图)
+- 进入 ⑩ Step 1 时按 `image_path` 加载 figure 截图作为视觉输入(详见本节末"LLM 路由"段);**`medical_statement` 仅作召回辅助(让图表 chunk 进 dense Top-N 池),不进 prompt**(见 §3.1.5.1 关键认知段)
 
 **规则 3:父块 → 同节图表**(图表跟随父块,见 §3.1.2):
 - 规则 1 展开出的父块或 Top-K 直接命中的父块,按 `heading_path_id` 批量查同节内的图表 chunk(`chunk_type ∈ {table, figure}`)
 - 全部合并进 LLM context,**封顶 `settings.agent_limits.RETRIEVE_PARENT_FIGURE_CAP`**(默认 5,见 §9.7)
 - 超过封顶按 `relative_chunk_index` 升序保留前 K 个(确定性顺序,无优先级判断)
-- 每条图表合并时把 `chunk_raw_text` + `medical_statement` + `image_path` 一并送进 prompt
+- 每条图表合并时把 `chunk_raw_text`(table=html / figure=caption + footnote)+ `image_path` 截图一并送进 ⑩ Step 1 prompt;`medical_statement` 不进 prompt(理由同规则 2)
 
 **规则 4:命中向量文本回带**(连接 §3.2.2 vector_hits 副载荷):
 - §3.2.2 多向量聚合产出的每条候选 chunk 携带 `vector_hits` 清单(命中的 vector_type / rank / matched_text)
-- Context 扩展时,**除规则 1~3 展开的父块/图表 chunk(含 medical_statement)外,把 vector_hits 中所有 matched_text 也作为 prompt hint 附加**(去重:matched_text 已被父块原文覆盖的整体跳过)
+- Context 扩展时,**除规则 1~3 展开的父块/图表 chunk 外,把 vector_hits 中所有 matched_text 也作为 prompt hint 附加**(去重:matched_text 已被父块原文覆盖的整体跳过);其中 vector_type='question'/'summary' 的 matched_text 来自 enrichment LLM 生成,**仅承担召回信号回带语义线索**的职责,不视为权威医学事实
 - 设计动机:summary / question 文本在 enrichment(§3.1.3)时由 LLM 看着完整 `heading_path` 生成,**天然带有标题路径上下文**(如"肺炎的临床表现")。父块原文可能 standalone 看不出病名(只是"三、临床表现"几段),把命中的 summary/question 文本送进 prompt 让 LLM 能看到"为什么这条 chunk 被召回"的语义线索
 - **Schema 影响**:`candidate_chunks: list[dict]` 子结构按 §3.2.2 形态,Pydantic 不强约束 list 元素 schema,新增 vector_hits 字段属 §9.2 第三类(给字段加默认值即可,反序列化老 state 时缺 vector_hits 视为 [],兼容)
 
@@ -803,4 +803,17 @@ Cross-Encoder 精排截断出 Top-K chunk 后,在构建 LLM prompt 前对每个 
 **为什么父块要带同节图表**:图表 chunk 在 Top-M 抢位上可能输给正文 chunk(Reranker 偏好自然语言 chunk)。但只要同节任一正文 child 命中 → 规则 1 拉父块 → 规则 3 拉同节图表,**图表跟随正文召回的兜底路径**因此打通,不依赖图表 chunk 自身进 Top-K。
 
 **父块大小**(2026-05-03 POC 验证):新切分方案下父块 median 1346 字 / p95 3563 字 / max 5218 字(~720~3700 token),约 56% 父块 > 1200 字会切多 child(其余 44% 父块 ≤ 1200 字,1 child = parent 整段)。父块全文 + 5 个图表的 payload 塞入 LLM prompt 完全可控,**不需要做任何"展开整节为多 chunk"的额外扩展逻辑** — 直接用父块文本 + 图表 payload 即可。
+
+**LLM 路由**(⑩ diagnose 三步链按需切换多模态):
+
+| 步骤 | LLM | 路由原因 |
+|---|---|---|
+| **Step 1 EvidenceSheet** | DashScope qwen3.5-plus(`settings.llm.VISION_*`,见 §9.3) | context 中 figure chunk 的 `image_path` 转 base64 作为多模态消息送入,LLM 自己看图;table chunk 仅送 `chunk_raw_text`(html 已是高质量文本,无需重看截图);figure 不在 context 时本步也固定走 vision LLM,代码无分支判断 |
+| **Step 2 DiagnosisRanking** | DeepSeek 主链 LLM(`settings.llm.*`) | 输入是 Step 1 浓缩好的结构化 `EvidenceSheet`,不再消费图截图 |
+| **Step 3 DiagnosisOutput** | DeepSeek 主链 LLM | 同上,基于 Step 2 排序做置信度校准 |
+
+**为什么 Step 1 固定走 vision 而不按需切换**:
+- 代码层避免"看 context 里有没有 figure 再决定走哪个 LLM"的运行时分支判断,提高可读性与可测性
+- vision LLM 处理纯文本输入也没问题,只是成本略高;但 ⑩ Step 1 是 Agent 主路径核心节点,稳定性优于成本
+- enrichment 阶段的图表入库(C4 figure_enrichment 已走 vision LLM 看图生成 `medical_statement` 用于召回)与诊断阶段的"再看一次图"职责分离 — 召回阶段的 vision LLM 看到的是孤立图,诊断阶段的 vision LLM 看到的是图 + 完整章节上下文 + 患者主诉 + 多轮证据,语义工作面完全不同,二者结论可能冲突 → 以诊断阶段为准
 

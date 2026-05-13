@@ -372,7 +372,7 @@ graph TB
     end
 
     subgraph 云端["云端服务"]
-        cloudapi["DashScope Cloud API<br/><i>qwen-max / qwen-plus</i><br/><i>OpenAI-compatible</i>"]
+        cloudapi["DeepSeek (主链 LLM)<br/><i>OpenAI-compatible</i><br/>DashScope qwen3.5-plus (多模态)<br/><i>F2.5 / F9 报告解析</i>"]
     end
 
     Client -->|"HTTP 80/443"| nginx
