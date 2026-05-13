@@ -126,7 +126,7 @@ All runtime caps and thresholds are centralized in `AgentLimitsSettings` (`pydan
 | `RETRIEVE_TOP_N` | 200 | post-RRF truncation |
 | `ASKABLE_GAIN_THRESHOLD` | 0.15 | symptom-level info-gain floor |
 | `ENTITY_LINKING_TIER2_THRESHOLD` | 0.92 | terms_collection cosine cutoff |
-| `RERANKER_CUTOFF_LAYERS` | None (= full 28) | layerwise early-exit |
+| `RERANKER_CUTOFF_LAYERS` | None (= full 40) | layerwise early-exit |
 
 **Hard rule**: business code must `from config.settings import settings` and read `settings.agent_limits.X`. Module-level constants like `MAX_X = 8` in node files are violations — they fragment under multi-task implementation. Tune via `.env` (e.g., `AGENT_MAX_FOLLOWUP_ROUNDS=10`), never code edits.
 
