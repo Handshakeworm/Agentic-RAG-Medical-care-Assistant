@@ -97,19 +97,10 @@ def test_healthz_and_readyz_not_implemented_yet(client: TestClient) -> None:
     assert client.get("/readyz").status_code == 404
 
 
-def test_routes_not_yet_implemented_still_404(client: TestClient) -> None:
-    """未完成的 G 阶段任务路由仍应 404。本测试随各任务完工逐条删除。
-
-    当前状态:
-    - / (根)                       — 没规划顶层欢迎页,长期 404
-    - G4 /diagnose                 — 待实现
-    - G5 /patients                 — 待实现
-    - G6 /admin                    — 待实现
-    """
+def test_root_path_not_implemented(client: TestClient) -> None:
+    """没规划顶层欢迎页,长期 404。
+    G4-G6 完工后 /diagnose、/patients/me、/admin/* 已实现,不再断言 404。"""
     assert client.get("/").status_code == 404
-    assert client.get("/diagnose").status_code == 404
-    assert client.get("/patients").status_code == 404
-    assert client.get("/admin").status_code == 404
 
 
 def test_register_routers_mounts_currently_implemented_routers() -> None:

@@ -18,6 +18,8 @@ from __future__ import annotations
 from fastapi import FastAPI
 from prometheus_fastapi_instrumentator import Instrumentator
 
+from config.settings import settings
+from src.api.middleware.rate_limiter import RateLimitMiddleware
 from src.api.routes import register_routers
 
 
@@ -41,6 +43,15 @@ def create_app() -> FastAPI:
         excluded_handlers=_METRICS_EXCLUDED_HANDLERS,
         should_group_status_codes=False,
     ).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+
+    # 限流(G3)— 内存滑动窗口,H6 改 Redis 后端时换 RateLimitBackend 实现即可。
+    # 必须在 register_routers 之前挂,确保对所有业务路由生效;Instrumentator 的
+    # /metrics 端点已在内部加入 excluded_paths 不会被挡。
+    app.add_middleware(
+        RateLimitMiddleware,
+        limit=settings.api.RATE_LIMIT_PER_MINUTE,
+        window_seconds=60,
+    )
 
     register_routers(app)
 

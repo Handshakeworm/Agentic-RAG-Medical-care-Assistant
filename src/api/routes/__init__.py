@@ -21,11 +21,14 @@ def register_routers(app: FastAPI) -> None:
     from src.api.routes.auth import router as auth_router
     app.include_router(auth_router, prefix="/auth", tags=["auth"])
 
-    # G4: from src.api.routes.diagnosis import router as diagnosis_router
-    #     app.include_router(diagnosis_router, tags=["diagnosis"])
-    # G5: from src.api.routes.patient import router as patient_router
-    #     app.include_router(patient_router, prefix="/patients", tags=["patient"])
-    # G6: from src.api.routes.admin import router as admin_router
-    #     app.include_router(admin_router, prefix="/admin", tags=["admin"])
+    from src.api.routes.diagnosis import router as diagnosis_router
+    app.include_router(diagnosis_router, tags=["diagnosis"])
+
+    from src.api.routes.patient import router as patient_router
+    app.include_router(patient_router, prefix="/patients", tags=["patient"])
+
+    from src.api.routes.admin import router as admin_router
+    app.include_router(admin_router, prefix="/admin", tags=["admin"])
+
     # H8: from src.api.routes.health import router as health_router
     #     app.include_router(health_router, tags=["health"])
