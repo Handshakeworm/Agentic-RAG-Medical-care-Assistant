@@ -1,0 +1,15 @@
+# Grafana dashboard provisioner - DEV_SPEC §8.4 H3
+# 让 Grafana 启动时从 /etc/grafana/provisioning/dashboards/ 自动加载所有 .json
+apiVersion: 1
+
+providers:
+  - name: medical-rag
+    orgId: 1
+    folder: Medical RAG
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

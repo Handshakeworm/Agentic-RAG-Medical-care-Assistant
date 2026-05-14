@@ -1,0 +1,82 @@
+# Promtail 配置 - 抓 Docker 容器 stdout/stderr → Loki
+# DEV_SPEC §5.2.1.1 / §5.2.2 / §8.4 H4
+#
+# 数据流:容器 stdout(json-file driver)→ /var/lib/docker/containers/<id>/<id>-json.log
+#       → Promtail tail + JSON 解析 → 提取 trace_id 等 label → Loki。
+#
+# 关键 label:
+#   - service:    容器名(api / postgres / milvus-... / nginx ...)
+#   - level:      INFO / WARNING / ERROR(从 JSON payload 解析)
+#   - trace_id:   全链路追踪 ID(spec §5.2.1.1 强制字段,审计↔日志关联)
+#                 注:Loki label cardinality 限制,trace_id 不做 label 而保留在
+#                 日志正文中,可用 `{service="api"} |= "trace_id" | json |
+#                 trace_id="..."` 检索
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # ── Docker 容器 stdout(项目所有 service)────────────────────────────────
+  - job_name: docker
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: docker
+          __path__: /var/lib/docker/containers/*/*-json.log
+
+    pipeline_stages:
+      # 1. 解 docker json-file driver 的外层包装({"log": "...", "stream": "...", "time": "..."})
+      - json:
+          expressions:
+            container_log: log
+            stream: stream
+            container_time: time
+
+      # 2. 解 docker container 名(从文件路径反查)
+      - regex:
+          source: filename
+          expression: '/var/lib/docker/containers/(?P<container_id>[^/]+)/'
+
+      # 3. 把 container_log 当做应用 JSON 日志再解一层(spec §5.2.1.1 字段)
+      - json:
+          source: container_log
+          expressions:
+            level: level
+            timestamp: timestamp
+            logger: logger
+            node: node
+            message: message
+
+      # 4. 设 label(低基数字段)— level / node 适合做 label,trace_id 不做
+      - labels:
+          level:
+          node:
+          stream:
+
+      # 5. timestamp 用应用日志的 timestamp 字段(若有),否则用 docker 的 time
+      - timestamp:
+          source: timestamp
+          format: RFC3339Nano
+          fallback_formats:
+            - RFC3339
+          action_on_failure: fudge      # 解析失败用 promtail 接收时间
+
+      # 6. 输出主体(message + 完整原始 payload)— 检索时可 |json 拆字段
+      - output:
+          source: container_log
+
+  # ── 宿主机系统日志(syslog / auth.log)— spec §5.2.2 表硬件/系统日志
+  - job_name: syslog
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: syslog
+          host: docker-host
+          __path__: /var/log/syslog

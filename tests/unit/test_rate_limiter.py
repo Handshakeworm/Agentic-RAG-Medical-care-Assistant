@@ -105,9 +105,16 @@ def test_retry_after_is_at_least_one_second() -> None:
 
 
 def _make_app(limit: int = 3, excluded: tuple = ("/metrics",)) -> FastAPI:
+    """注:H6 已把默认 backend 改成 RedisSlidingWindow,集成测试这里要显式
+    传 InMemorySlidingWindow() — 否则会去打真 Redis(开发机有 docker compose 起着),
+    串库且行为不可控。Redis 后端有专门的 test_redis_rate_limit_backend.py 覆盖。"""
     app = FastAPI()
     app.add_middleware(
-        RateLimitMiddleware, limit=limit, window_seconds=60, excluded_paths=excluded
+        RateLimitMiddleware,
+        backend=InMemorySlidingWindow(),
+        limit=limit,
+        window_seconds=60,
+        excluded_paths=excluded,
     )
 
     @app.get("/ping")

@@ -1,0 +1,216 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "title": "QPS - HTTP 总请求率",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total[1m])) by (handler)",
+          "legendFormat": "{{handler}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" }
+      }
+    },
+    {
+      "title": "HTTP 5xx 错误率",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total{status=~\"5..\"}[1m])) / sum(rate(http_requests_total[1m]))",
+          "legendFormat": "5xx ratio",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit", "max": 1, "min": 0 }
+      }
+    },
+    {
+      "title": "HTTP 端到端延迟 P95",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (handler, le))",
+          "legendFormat": "P95 {{handler}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" }
+      }
+    },
+    {
+      "title": "LLM 结构化输出延迟 P50/P95",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(structured_output_latency_seconds_bucket[5m])) by (node, le))",
+          "legendFormat": "P50 {{node}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(structured_output_latency_seconds_bucket[5m])) by (node, le))",
+          "legendFormat": "P95 {{node}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" }
+      }
+    },
+    {
+      "title": "LLM 失败 / 重试 / 兜底 总计",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        {
+          "expr": "sum(rate(structured_output_attempt_total[1m])) by (node)",
+          "legendFormat": "attempt {{node}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(structured_output_retry_total[1m])) by (node)",
+          "legendFormat": "retry {{node}}",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(structured_output_failure_total[1m])) by (node)",
+          "legendFormat": "failure {{node}}",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(rate(structured_output_fallback_triggered_total[1m])) by (node)",
+          "legendFormat": "fallback {{node}}",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "title": "Diagnose 失败原因分布",
+      "type": "piechart",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        {
+          "expr": "sum by (reason_kind) (increase(diagnose_failure_reason_total[1h]))",
+          "legendFormat": "{{reason_kind}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "上下文 - 每次 LLM token 数 P95",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 18 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(context_tokens_per_llm_call_bucket[5m])) by (node, le))",
+          "legendFormat": "P95 {{node}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    },
+    {
+      "title": "上下文 - 循环轮次分布",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 18 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(context_loop_iterations_bucket[5m])) by (loop_type, le))",
+          "legendFormat": "P50 {{loop_type}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(context_loop_iterations_bucket[5m])) by (loop_type, le))",
+          "legendFormat": "P95 {{loop_type}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "title": "依赖层 - PG 查询延迟 P95",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(db_query_latency_seconds_bucket[5m])) by (operation, le))",
+          "legendFormat": "P95 {{operation}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" }
+      }
+    },
+    {
+      "title": "依赖层 - Redis 命令延迟 P95",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 24 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(redis_command_latency_seconds_bucket[5m])) by (command, le))",
+          "legendFormat": "P95 {{command}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" }
+      }
+    },
+    {
+      "title": "依赖层 - Milvus RPC 延迟 P95",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 24 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(milvus_rpc_latency_seconds_bucket[5m])) by (collection, operation, le))",
+          "legendFormat": "P95 {{collection}}/{{operation}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" }
+      }
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["medical-rag", "app"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timezone": "",
+  "title": "Medical RAG - 应用性能",
+  "uid": "medical-rag-app",
+  "version": 1,
+  "weekStart": ""
+}

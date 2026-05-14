@@ -1,0 +1,52 @@
+# Loki 单机最简配置 - DEV_SPEC §5.2.1.1 / §5.2.2 / §8.4 H4
+#
+# 单实例部署:filesystem 后端,所有数据存 /loki(挂 /data/volumes/loki)。
+# 保留期 90d(对齐 §5.2.3.5 rag_trace 90 天保留;两路系统同步过期便于联合查询)。
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+
+common:
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2026-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+compactor:
+  working_directory: /loki/compactor
+  compaction_interval: 10m
+  retention_enabled: true
+  retention_delete_delay: 2h
+  retention_delete_worker_count: 50
+  delete_request_store: filesystem
+
+limits_config:
+  retention_period: 2160h               # 90 天(对齐 spec §5.2.3.5)
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h
+  ingestion_rate_mb: 10
+  ingestion_burst_size_mb: 20
+  max_streams_per_user: 0               # 单实例无多租户
+
+ruler:
+  alertmanager_url: ""                  # MVP 不接 Alertmanager,告警在 Grafana 配

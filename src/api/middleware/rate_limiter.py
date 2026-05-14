@@ -12,9 +12,12 @@
 - 超限响应:429 + `Retry-After` header(HTTP 7231 标准)+ JSON body 含
   retry_after_seconds / limit / window_seconds 三个字段供前端做 UI 提示
 
+**H6 已接入**(spec §8.4 H6):默认 backend = `RedisSlidingWindow`(多实例共享配额),
+Redis 不可用时 fail-open(放行,见 `RedisSlidingWindow` docstring)。本进程内若
+显式传 `backend=InMemorySlidingWindow()` 仍可走单进程兜底,主要供单元测试 / 单机
+开发用。
+
 **不在本任务范围**:
-- Redis 后端 → H6
-- 多实例配额共享 → H6(单进程进程内有效就行,§G3 验收明确)
 - 按角色 / 按端点的细粒度配额 → 后续,目前全局统一 settings.api.RATE_LIMIT_PER_MINUTE
 - token bucket / leaky bucket 算法 → spec 钦定滑动窗口
 """
@@ -121,7 +124,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         excluded_paths: Iterable[str] = _DEFAULT_EXCLUDED_PATHS,
     ) -> None:
         super().__init__(app)
-        self.backend: RateLimitBackend = backend or InMemorySlidingWindow()
+        # 默认 Redis 后端(H6 / spec §8.4)— Redis 不可用时 RedisSlidingWindow 内部
+        # fail-open,中间件这层不感知。单进程开发 / 单元测试可显式传 InMemorySlidingWindow()
+        # 绕开 Redis。
+        if backend is None:
+            from src.db.redis.rate_limit_backend import RedisSlidingWindow
+            backend = RedisSlidingWindow()
+        self.backend: RateLimitBackend = backend
         self.limit = limit
         self.window_seconds = window_seconds
         self.excluded_paths = set(excluded_paths)

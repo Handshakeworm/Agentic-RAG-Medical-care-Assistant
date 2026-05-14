@@ -38,6 +38,13 @@ services:
     container_name: api
     env_file:
       - .env
+    # .env 里 POSTGRES_HOST=localhost / MILVUS_HOST=localhost 是给 host 上跑的 uvicorn
+    # 用的；容器内必须用 docker-compose 服务名(同 main 网络的 DNS 名),否则连不到。
+    # `environment` 优先级高于 env_file,刚好覆盖。
+    environment:
+      POSTGRES_HOST: postgres
+      MILVUS_HOST: milvus-standalone
+      REDIS_URL: redis://redis:6379
     volumes:
       - ${EMBEDDING_MODEL_PATH}:${EMBEDDING_MODEL_PATH}:ro
       - ${RERANKER_MODEL_PATH}:${RERANKER_MODEL_PATH}:ro
@@ -45,6 +52,15 @@ services:
       - ${MINERU_OUTPUT_DIR}:${MINERU_OUTPUT_DIR}
     expose:
       - "8000"
+    # GPU 透传 — Embedding / Reranker 跑在 NVIDIA GPU。需要宿主装
+    # nvidia-container-toolkit(已在 J0 前置完成),否则 dcgm-exporter 也起不来。
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     depends_on:
       postgres:
         condition: service_healthy
@@ -53,7 +69,9 @@ services:
       milvus-standalone:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      # spec §5.2.4 / §8.4 H8:liveness 走 /healthz(零依赖,固定 200);不走
+      # /readyz —— 否则 PG/Milvus 任一抖动会让 Docker 误判 api 容器 unhealthy
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -198,9 +216,11 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
     volumes:
       - ./infra/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./infra/grafana/datasources:/etc/grafana/provisioning/datasources:ro
       - /data/volumes/grafana:/var/lib/grafana
     depends_on:
       - prometheus
+      - loki
     networks:
       - main
     restart: unless-stopped

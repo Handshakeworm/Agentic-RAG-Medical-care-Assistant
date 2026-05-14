@@ -1,12 +1,16 @@
-"""src/common/metrics.py — 结构化输出可观测性原料(DEV_SPEC §9.1)。
+"""src/common/metrics.py — 可观测性原料(DEV_SPEC §9.1 + §4.2.7 + H2)。
 
-**只暴露**:
-1. 6 个 Prometheus 指标对象(模块级单例)
-2. `RetryObserver`(LangChain `BaseCallbackHandler` 子类)+ `retry_observer` 单例
+**只暴露**(模块级单例 + RetryObserver,严禁封装装饰器 / helper / 上下文管理器):
 
-**严禁**(spec §9.1 实现风格约定):
-- 不封装装饰器、helper 函数、上下文管理器
-- 不在本模块内做任何 LLM 调用包装
+- §9.1 结构化输出健康度(6 个,业务节点必带):
+  `_attempts` / `_retries` / `_failures` / `_fallbacks` / `_latency` / `_diagnose_reason`
+- §4.2.7 上下文 / 会话级(4 个,Agent 调 LLM 前 / 会话结束时 .observe()):
+  `context_tokens_per_llm_call` / `context_structured_fields_size` /
+  `context_messages_count` / `context_loop_iterations`
+- 依赖层(H2,SDK 原生路径调用前 .observe()):
+  `db_query_latency_seconds`(SQLAlchemy)/ `redis_command_latency_seconds`(redis-py)/
+  `milvus_rpc_latency_seconds`(pymilvus)
+- `RetryObserver`(LangChain `BaseCallbackHandler` 子类)+ `retry_observer` 单例
 
 各 LLM 调用点按 §9.1 模板裸写 try/except/finally,主动 import 这里的指标做
 `.labels(...).inc()` / `.observe()`,并把 `retry_observer` 通过 `config={"callbacks": [retry_observer]}`
@@ -18,7 +22,7 @@
 from __future__ import annotations
 
 from langchain_core.callbacks import BaseCallbackHandler
-from prometheus_client import Counter, Histogram
+from prometheus_client import Counter, Gauge, Histogram
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -60,6 +64,74 @@ _diagnose_reason = Counter(
     "diagnose_failure_reason_total",
     "⑩ diagnose 节点失败原因分桶(按 failure_reason 写入时 .inc())",
     ["reason_kind"],
+)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 上下文 / 会话级(spec §4.2.7 表 1,4 个)
+# ────────────────────────────────────────────────────────────────────────────
+
+
+context_tokens_per_llm_call = Histogram(
+    "context_tokens_per_llm_call",
+    "每次 LLM 调用实际传入的 token 数(本地用 tiktoken 估算 prompt token,调 LLM 前 .observe())",
+    ["node", "model"],
+    buckets=(100, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000),
+)
+
+context_structured_fields_size = Gauge(
+    "context_structured_fields_size",
+    "MedicalState 中结构化字段总体积(字符数),会话结束时或检查点 .set() 一次",
+    ["session_id"],
+)
+
+context_messages_count = Histogram(
+    "context_messages_count",
+    "会话结束时 messages 列表长度",
+    ["session_id"],
+    buckets=(1, 3, 5, 8, 12, 18, 25, 40, 60, 100),
+)
+
+context_loop_iterations = Histogram(
+    "context_loop_iterations",
+    "追问 / 检查循环实际执行次数(spec §9.7 MAX_FOLLOWUP_ROUNDS=8 / MAX_EXAM_ROUNDS=3 是上限)",
+    ["loop_type"],  # "followup" | "exam"
+    buckets=(1, 2, 3, 4, 5, 6, 7, 8, 10),
+)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 依赖层(spec §5.2.1 ③ + H2,SDK 原生指标包装)
+# ────────────────────────────────────────────────────────────────────────────
+
+
+db_query_latency_seconds = Histogram(
+    "db_query_latency_seconds",
+    "PG 查询端到端耗时(SQLAlchemy before/after_cursor_execute 事件)",
+    ["operation"],  # SELECT / INSERT / UPDATE / DELETE / OTHER
+)
+
+db_pool_checkedout = Gauge(
+    "db_pool_checkedout",
+    "PG 连接池正在使用的连接数(SQLAlchemy engine.pool.checkedout())",
+)
+
+redis_command_latency_seconds = Histogram(
+    "redis_command_latency_seconds",
+    "Redis 命令耗时(各调用点用 time.perf_counter 包一次性能开销 ~微秒)",
+    ["command"],  # GET / SETEX / DEL / EVALSHA / PING / OTHER
+)
+
+milvus_rpc_latency_seconds = Histogram(
+    "milvus_rpc_latency_seconds",
+    "Milvus RPC 耗时(connection wrapper 在 search/query/insert/upsert 入口 .observe())",
+    ["collection", "operation"],
+)
+
+milvus_rpc_errors_total = Counter(
+    "milvus_rpc_errors_total",
+    "Milvus RPC 错误计数(异常分类)",
+    ["collection", "operation", "error_code"],
 )
 
 

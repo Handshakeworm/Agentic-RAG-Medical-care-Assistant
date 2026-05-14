@@ -30,5 +30,6 @@ def register_routers(app: FastAPI) -> None:
     from src.api.routes.admin import router as admin_router
     app.include_router(admin_router, prefix="/admin", tags=["admin"])
 
-    # H8: from src.api.routes.health import router as health_router
-    #     app.include_router(health_router, tags=["health"])
+    # H8 健康检查 — /healthz + /readyz,Instrumentator + 限流已 exclude(G1/G3)
+    from src.api.routes.health import router as health_router
+    app.include_router(health_router, tags=["health"])

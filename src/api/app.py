@@ -18,9 +18,13 @@ from __future__ import annotations
 from fastapi import FastAPI
 from prometheus_fastapi_instrumentator import Instrumentator
 
+from config.logging_config import configure_logging
 from config.settings import settings
 from src.api.middleware.rate_limiter import RateLimitMiddleware
+from src.api.middleware.trace_id import TraceIdMiddleware
 from src.api.routes import register_routers
+from src.db.postgres.connection import get_engine
+from src.db.postgres.metrics import install_engine_metrics
 
 
 _API_TITLE = "Agentic RAG Medical Care Assistant API"
@@ -35,6 +39,13 @@ _METRICS_EXCLUDED_HANDLERS = ["/healthz", "/readyz", "/metrics"]
 def create_app() -> FastAPI:
     """构造并配置 FastAPI 实例。测试用 `from src.api.app import create_app; app = create_app()`
     可绕过模块级单例,得到独立 app(便于隔离 fixture)。"""
+    # 全局 JSON 日志(H4 / spec §5.2.1.1)— 必须在创建 FastAPI 之前调,否则
+    # uvicorn 已挂上的纯文本 handler 没机会被替换。幂等。
+    configure_logging()
+
+    # PG 依赖层指标(H2 / spec §5.2.1 ③)— SQLAlchemy event listener,幂等
+    install_engine_metrics(get_engine())
+
     app = FastAPI(title=_API_TITLE, version=_API_VERSION)
 
     # HTTP 层指标自动采集(§5.2.1 ②)。一行接入,业务代码完全不感知。
@@ -52,6 +63,11 @@ def create_app() -> FastAPI:
         limit=settings.api.RATE_LIMIT_PER_MINUTE,
         window_seconds=60,
     )
+
+    # trace_id 注入(H4 / spec §5.2.1.1)— 必须在 RateLimitMiddleware **之后**
+    # 调 add_middleware(Starlette 中间件挂载是反序执行,后挂的更外层),让
+    # 429 响应也带 trace_id。所有日志、rag_trace、Loki label 用同一 ID。
+    app.add_middleware(TraceIdMiddleware)
 
     register_routers(app)
 

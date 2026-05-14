@@ -1,0 +1,55 @@
+# Docker build context 排除清单 — 没这文件 build context 会把 .venv (~5GB)、
+# data/、tests/ 都打包发给 docker daemon,build 慢且镜像大
+
+# Python
+.venv/
+.venv*/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# 测试 — 镜像里不需要 test 代码 + fixture
+tests/
+
+# 文档与 spec — 运行时不需要
+DEV_SPEC.md
+README.md
+README.en.md
+CLAUDE.md
+docs/
+.claude/
+
+# 大数据 / 模型(只读卷挂载,不进镜像)
+data/
+/data/
+*.pdf
+*.json.bak
+
+# 开发工具
+.git/
+.gitignore
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 运行时本地状态
+*.log
+.env*
+!.env.example
+docker-compose.demo.yml
+docker-compose.override.yml
+infra/grafana/
+infra/prometheus/
+infra/loki/
+infra/promtail/

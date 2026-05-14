@@ -86,10 +86,13 @@
 Agentic-RAG-Medical-care-Assistant/
 │
 ├── docker-compose.yml                  # 容器编排（共 13 个）：nginx, api, Milvus（standalone+etcd+minio）, PostgreSQL, Redis, Prometheus, Grafana, Loki, Promtail, Node Exporter, DCGM Exporter（LLM 推理通过云端 API 调用）
+├── .dockerignore                       # docker build 上下文排除（.venv / tests / data / infra/{grafana,prometheus,...}），J0 新增
 ├── .env.example                        # 环境变量模板（不提交 .env）
 ├── .gitignore
-├── pyproject.toml                      # 项目依赖与构建配置
-├── README.md
+├── pyproject.toml                      # 项目依赖与构建配置（含 [tool.uv].extra-index-url cu128）
+├── alembic.ini                         # 数据库迁移配置（Alembic）
+├── README.md                           # 中文 README
+├── README.en.md                        # 英文 README（J5 完善前为占位）
 ├── DEV_SPEC.md                         # 技术文档
 │
 ├── config/                             # 静态配置文件

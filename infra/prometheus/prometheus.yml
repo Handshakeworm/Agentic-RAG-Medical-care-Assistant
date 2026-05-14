@@ -1,0 +1,64 @@
+# Prometheus scrape 配置 - DEV_SPEC §5.2.1 / §5.2.2 / §8.4 H2 + H5 + H5b
+#
+# 三类抓取目标:
+# 1. api:8000/metrics           — 业务 + HTTP + 依赖层指标(H2)
+# 2. node-exporter:9100/metrics — 宿主机 CPU / 内存 / 磁盘 / 网络(H5)
+# 3. dcgm-exporter:9400/metrics — GPU 使用率 / 显存 / 温度 / 功耗(H5b)
+#
+# 容器名作 target host(同 docker-compose 网络 main 内 DNS 自动解析)。
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: medical-rag
+    env: development
+
+# Alertmanager 集成 — MVP 阶段不接,告警在 Grafana Alerting 配置(spec §5.2.2 末)
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ["alertmanager:9093"]
+
+# 规则文件 — 指标聚合 / Recording rules,MVP 阶段空
+rule_files: []
+
+scrape_configs:
+  # ── 应用层指标(H2 + G1 instrumentator)──────────────────────────────────
+  - job_name: api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8000"]
+        labels:
+          service: api
+
+  # ── Prometheus 自身 ─────────────────────────────────────────────────────
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # ── 宿主机硬件(spec §5.2.2 / H5)─────────────────────────────────────
+  - job_name: node-exporter
+    static_configs:
+      - targets: ["node-exporter:9100"]
+        labels:
+          service: node-exporter
+
+  # ── GPU(spec §5.2.2 / H5b)────────────────────────────────────────────
+  - job_name: dcgm-exporter
+    static_configs:
+      - targets: ["dcgm-exporter:9400"]
+        labels:
+          service: dcgm-exporter
+
+  # ── Loki 自身指标(便于观察日志吞吐 / 写入失败)─────────────────────────
+  - job_name: loki
+    static_configs:
+      - targets: ["loki:3100"]
+    metrics_path: /metrics
+
+  # ── Grafana 自身指标 ─────────────────────────────────────────────────────
+  - job_name: grafana
+    static_configs:
+      - targets: ["grafana:3000"]
+    metrics_path: /metrics

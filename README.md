@@ -414,13 +414,12 @@ PostgreSQL 20 表按职责分四组,完整 SQL DDL 见 [DEV_SPEC §2.4](DEV_SPEC
 
 ## 快速开始
 
-> 适用场景:本地开发与功能演示。生产容器化部署待 K 阶段(`Dockerfile.api`)完工。
+主路径 = 全 docker compose 一键起。host 跑 uvicorn 仅作为热重载调试备选。
 
 ```bash
-# 1. 克隆 + 安装依赖
+# 1. 克隆
 git clone https://github.com/<your-org>/Agentic-RAG-Medical-care-Assistant.git
 cd Agentic-RAG-Medical-care-Assistant
-uv sync                                     # 含 PyTorch cu128 wheel,首次 ~2GB
 
 # 2. 配置环境变量
 cp .env.example .env
@@ -429,29 +428,41 @@ cp .env.example .env
 #   LLM_VISION_API_KEY     (DashScope)
 #   JWT_SECRET_KEY         (openssl rand -hex 32)
 
-# 3. 起数据层(Milvus 三件套 + PG + Redis + 监控,共 13 容器)
-docker compose up -d
+# 3. 起全栈(13 容器:nginx + api + 数据层 + 监控)
+#    首次 build api 镜像 ~10-15 分钟(下 PyTorch + nvidia-* wheels ~5GB)
+#    需 nvidia-container-toolkit(GPU 透传给 api / dcgm-exporter)
+docker compose up -d --build
+docker compose ps                            # 全 healthy 才算就绪
 
-# 4. 初始化数据库 schema(20 张表 + 索引)
-source .venv/bin/activate
-alembic upgrade head
-
-# 5. 启动 API
-uvicorn src.api.app:app --host 0.0.0.0 --port 8000
-
-# 6. (可选) 起 Nginx 演示反向代理
-docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d nginx
+# 4. 初始化数据库 schema(20 张表 + 索引,首次部署一次)
+docker compose exec api alembic upgrade head
 ```
 
-**验证**:
+**验证**(经 nginx 80):
 
 ```bash
-curl http://localhost:8000/metrics                        # Prometheus 指标
-curl http://localhost:8000/auth/me                        # 401 未带 token
-curl -X POST http://localhost:8000/auth/register \
+curl http://localhost/healthz                # {"status":"ok"}
+curl -i http://localhost/readyz              # 200 + x-trace-id header
+curl http://localhost/metrics | head         # Prometheus 业务指标
+curl -X POST http://localhost/auth/register \
   -H 'content-type: application/json' \
   -d '{"email":"a@b.com","password":"hunter22","role":"patient"}'
 # → {"access_token":"...", ...}
+```
+
+打开 `http://localhost:3000`(admin/admin)→ Dashboards → "Medical RAG" → "应用性能" / "硬件资源" 实时大盘。
+
+**热重载开发**(改 src/ 想立刻看效果时):
+
+```bash
+# 主 compose 起依赖,api 在 host 跑(可热重载 + IDE debugger)
+docker compose up -d postgres redis milvus-standalone prometheus loki grafana promtail node-exporter dcgm-exporter
+uv sync
+source .venv/bin/activate
+uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --reload
+
+# 想用 nginx 反代到 host uvicorn(让限流 / trace_id 链路也走通):
+docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d nginx
 ```
 
 ---
@@ -464,7 +475,7 @@ curl -X POST http://localhost:8000/auth/register \
 
 ## 项目进度
 
-详见 [DEV_SPEC.md §8.4 进度跟踪表](DEV_SPEC.md#84-进度跟踪表)。截至 2026-05-13:
+详见 [DEV_SPEC.md §8.4 进度跟踪表](DEV_SPEC.md#84-进度跟踪表)。截至 2026-05-14:
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
@@ -475,12 +486,11 @@ curl -X POST http://localhost:8000/auth/register \
 | E | Retrieval(Sparse / Dense / RRF / Reranker / Filter) | 完成 |
 | F | Agent 工作流(16 节点 + 2 路由) | 完成 |
 | G | API 层与权限系统(7 项) | 完成 |
-| H | 基础设施增强(Redis / Prometheus / Grafana / Loki / DCGM) | 待开始 |
+| H | 基础设施增强(Redis / Prometheus / Grafana / Loki / DCGM) | 完成 |
 | I | 评估体系(RAG / Agent / LLM Judge / 在线追踪) | 待开始 |
-| J | 端到端验收与文档收口 | 待开始 |
-| K | 容器化与上线(Dockerfile.api + 一键部署) | 待开始 |
+| J | 端到端验收与文档收口 | J0(Docker 化部署)完成,J1-J6 待开始 |
 
-**测试覆盖**:整体 351 PASS / 17 skip(GPU 模型 + 已知 Milvus race);unit 280 全 mock,integration 71 真 PG + Milvus + Redis,e2e 留 J 阶段。
+**测试覆盖**:unit 355 PASS / integration 71 PASS(真 PG + Milvus + Redis)/ e2e 留 J1-J4;skip 17(GPU 模型 + 已知 Milvus race)。
 
 ---
 
@@ -492,7 +502,8 @@ curl -X POST http://localhost:8000/auth/register \
 ├── CLAUDE.md                # AI 协作工作流与契约红线
 ├── pyproject.toml           # uv 依赖,锁定 cu128 wheel index
 ├── docker-compose.yml       # 数据层 + 监控基础设施(13 容器)
-├── docker-compose.demo.yml  # G7 演示用 override(K 阶段前)
+├── docker-compose.demo.yml  # ⚠️ DEPRECATED 自 J0,仅 host 热重载调试用
+├── .dockerignore            # docker build 上下文排除(J0)
 ├── alembic.ini              # 数据库迁移配置
 │
 ├── src/

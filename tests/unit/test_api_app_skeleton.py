@@ -86,15 +86,9 @@ def test_metrics_endpoint_self_excluded_from_metrics(client: TestClient) -> None
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# G1 NOT-IN-SCOPE 锁定:H8 才实现的端点 / G2-G6 才实现的业务路由
+# G1 NOT-IN-SCOPE 锁定:G2-G6 才实现的业务路由
+# (`/healthz` / `/readyz` 已在 H8 实现,test_health_routes.py 覆盖,本文件不再断言)
 # ────────────────────────────────────────────────────────────────────────────
-
-
-def test_healthz_and_readyz_not_implemented_yet(client: TestClient) -> None:
-    """spec G1 验收说明:`/healthz` `/readyz` 在 H8 实现,本任务不实现也不占名。
-    现在打这两个端点应得 404,等 H8 接入时这个测试会变红 → 回头删本断言即可。"""
-    assert client.get("/healthz").status_code == 404
-    assert client.get("/readyz").status_code == 404
 
 
 def test_root_path_not_implemented(client: TestClient) -> None:
@@ -109,7 +103,8 @@ def test_register_routers_mounts_currently_implemented_routers() -> None:
 
     当前实现状态:
     - G2 ✅ /auth/register, /auth/login, /auth/me
-    - G4/G5/G6/H8 仍是占位注释
+    - G4/G5/G6 业务路由已实现
+    - H8 ✅ /healthz, /readyz
     """
     paths = {r.path for r in app.routes if hasattr(r, "path")}
     assert {"/auth/register", "/auth/login", "/auth/me"}.issubset(paths), (

@@ -86,10 +86,13 @@
 Agentic-RAG-Medical-care-Assistant/
 │
 ├── docker-compose.yml                  # 容器编排（共 13 个）：nginx, api, Milvus（standalone+etcd+minio）, PostgreSQL, Redis, Prometheus, Grafana, Loki, Promtail, Node Exporter, DCGM Exporter（LLM 推理通过云端 API 调用）
+├── .dockerignore                       # docker build 上下文排除（.venv / tests / data / infra/{grafana,prometheus,...}），J0 新增
 ├── .env.example                        # 环境变量模板（不提交 .env）
 ├── .gitignore
-├── pyproject.toml                      # 项目依赖与构建配置
-├── README.md
+├── pyproject.toml                      # 项目依赖与构建配置（含 [tool.uv].extra-index-url cu128）
+├── alembic.ini                         # 数据库迁移配置（Alembic）
+├── README.md                           # 中文 README
+├── README.en.md                        # 英文 README（J5 完善前为占位）
 ├── DEV_SPEC.md                         # 技术文档
 │
 ├── config/                             # 静态配置文件
@@ -3959,6 +3962,7 @@ flowchart TD
 
 | 编号 | 任务 | 产出文件 | 验收标准 |
 |------|------|---------|---------|
+| J0 | Docker 化部署 | `infra/docker/Dockerfile.api`、`.dockerignore`、`docker-compose.yml`（如需） | api 容器可成功 `docker compose build api` 通过；`docker compose up -d api nginx` 全栈起来 + healthcheck 转绿；`/healthz` 经 nginx → api 链路通；H8 readyz 探到容器内 PG/Milvus；H2 / H4 业务指标与日志通过容器化的 api 流到 Prometheus / Loki（应用性能 dashboard 不再空） |
 | J1 | E2E：Ingestion 全链路 | `tests/e2e/test_ingestion_e2e.py`（与 C7 的 `tests/integration/test_ingestion_pipeline.py` 区分：C7 是 Mock 依赖的集成测试，J1 是真实 Milvus/PG 的端到端冒烟） | 样例 PDF → MinerU 产物 → 完整摄取 → Milvus + PostgreSQL（含 raw_documents 表）数据验证 |
 | J2 | E2E：Retrieval 全链路 | `tests/e2e/test_retrieval_e2e.py`（走真实 Milvus + 真实 Embedding/Reranker） | 真实 query → 双路召回 → RRF → Rerank → Top-K 结果校验 |
 | J3 | E2E：Agent 全链路 | `tests/e2e/test_agent_workflow_e2e.py`（**与 F15 的 `tests/integration/test_agent_workflow.py` 区分**：F15 走 Mock LLM + Mock DB 的集成测试，J3 走真实 DashScope + 真实 Milvus/PG 的端到端冒烟） | 模拟患者输入 → 完整工作流 → 诊断输出（覆盖正常/高危/追问/低置信度路径） |
@@ -4062,21 +4066,21 @@ flowchart TD
 | G4 | 问诊接口 | [x] | 2026-05-13 | `src/api/routes/diagnosis.py` `POST /diagnose`(async + `Depends(get_current_user)`):首次建 sessions 行 + invoke graph;后续轮 `Command(resume=...)` 恢复 interrupt;通过 `aget_state(...).next` 区分终态 vs `wait_followup_answer` / `wait_exam_report` interrupt → status 状态机 `ongoing_followup` / `ongoing_exam` / `completed`;终态按 §9.6.2/§9.6.5 裸代码模板组装 rag_trace 15 字段 + conversations 1 行同事务写;失败兜底 `_build_error_info` 派生 step;`patient_repo.load_medical_history` 升级为真查询(8 张表 → spec §4.1.1 dict);8 integration PASS(graph mock,验首轮终态/失败兜底/两种 interrupt/越权 403/不存在 404)。⚠️ checkpointer 当前 `InMemorySaver` 模块级单例,生产应换 `PostgresSaver`(deps 已有)|
 | G5 | 患者信息接口 | [x] | 2026-05-13 | `src/api/routes/patient.py` 11 端点(GET/PUT `/me` + 三张 ⚠️必问表 medical-history/allergies/medications POST/DELETE);全部 `require_role("patient")`,**没有 path 参数**(身份隔离从设计上根除越权);PUT `/me` 自动建 patients 行(注册时不建,延后到首次填档);`_delete_owned_or_404` 验 owner 防泄漏存在性;`_ensure_patient_row` 子表写入前兜底建 patients 行;8 integration PASS(admin 角色 403 / 部分更新语义 / 创建-查看-删除闭环 / 跨用户 404 / safety_gate 同链路读取一致)。⚠️ 5 张子表(surgical_trauma/transfusion/family_history/menstrual/exam_reports)只在 GET 全档案返回,独立 CRUD 留 TODO;exam_reports 文件上传需 multipart endpoint 单独做 |
 | G6 | 管理员接口 | [x] | 2026-05-13 | `src/api/routes/admin.py` 6 端点(GET `/users` 分页 + DELETE `/users/{id}`(防删自己)+ system_config GET 列表/单条/PUT/DELETE + `/kb/upload` stub);全部 `require_role("admin")`;PUT `/admin/config/{key}` 同事务写 system_config + config_change_log(spec §5.3.1 末);`change_reason` 字段 schema 强制 `min_length=1` 防止变更无说明;10 integration PASS(角色守卫 + 分页 + 防删自己 + change_log 同事务双行 + delete 也写日志 new_value=null + stub 返 202+unimplemented)。⚠️ 知识库上传走 stub:C7 ingestion pipeline 入口函数未做完,本端点提示走 scripts 路径;C7 完工后改 multipart 上传 + 后台 task + kb_change_log |
-| G7 | Nginx 反向代理 | [x] | 2026-05-13 | `infra/docker/nginx.conf`(docker-compose 已挂);worker 自动 + upstream keepalive 32 + `client_max_body_size 50M`(为知识库/exam_reports 上传)+ `proxy_read_timeout 600s`(LLM 慢路径)+ `set_real_ip_from + X-Forwarded-For + X-Real-IP`(让 G3 限流拿到真实客户端 IP,否则全是 nginx 容器 IP IP 桶失效)+ `X-Forwarded-Proto`(FastAPI redirect/OpenAPI scheme);`/nginx-health` 内嵌 200 给外部 LB 探活;HTTPS / TLS 留生产部署再接(本期 demo HTTP)。**真起验证**(2026-05-13):`docker-compose.demo.yml` override(K 阶段 `Dockerfile.api` 完工前用,host 跑 uvicorn 8000 + nginx 容器 `extra_hosts: api:host-gateway` 把 nginx.conf 里 `server api:8000` 解到宿主机,主 compose 不动 K 阶段无缝继承)— curl `localhost:80/{nginx-health,/metrics,/auth/me,/auth/register,/auth/me with token}` 全链路 200 / 401 闭环验通,nginx 日志 rt=2ms,X-Real-IP 透传 OK |
+| G7 | Nginx 反向代理 | [x] | 2026-05-13 | `infra/docker/nginx.conf`(docker-compose 已挂);worker 自动 + upstream keepalive 32 + `client_max_body_size 50M`(为知识库/exam_reports 上传)+ `proxy_read_timeout 600s`(LLM 慢路径)+ `set_real_ip_from + X-Forwarded-For + X-Real-IP`(让 G3 限流拿到真实客户端 IP,否则全是 nginx 容器 IP IP 桶失效)+ `X-Forwarded-Proto`(FastAPI redirect/OpenAPI scheme);`/nginx-health` 内嵌 200 给外部 LB 探活;HTTPS / TLS 留生产部署再接(本期 demo HTTP)。**真起验证**(2026-05-13):`docker-compose.demo.yml` override(J0 `Dockerfile.api` 完工前用,host 跑 uvicorn 8000 + nginx 容器 `extra_hosts: api:host-gateway` 把 nginx.conf 里 `server api:8000` 解到宿主机,主 compose 不动 J0 无缝继承)— curl `localhost:80/{nginx-health,/metrics,/auth/me,/auth/register,/auth/me with token}` 全链路 200 / 401 闭环验通,nginx 日志 rt=2ms,X-Real-IP 透传 OK |
 
 ### 阶段 H：基础设施增强
 
 | 编号 | 任务名称 | 状态 | 完成日期 | 备注 |
 |------|---------|------|---------|------|
-| H1 | Redis 缓存客户端 | [ ] | | |
-| H2 | Prometheus 指标埋点 | [ ] | | |
-| H3 | Grafana 仪表盘 | [ ] | | |
-| H4 | 日志采集（Promtail → Loki） | [ ] | | |
-| H5 | Node Exporter 硬件监控 | [ ] | | |
-| H5b | DCGM Exporter GPU 监控 | [ ] | | |
-| H6 | Redis 缓存与业务层对接 | [ ] | | |
-| H7 | 动态配置管理 | [ ] | | |
-| H8 | 健康检查端点 | [ ] | | |
+| H1 | Redis 缓存客户端 | [x] | 2026-05-14 | `src/db/redis/cache.py` Cache-Aside；`config:<key>` 命名空间 + 60s TTL（settings.redis.CONFIG_CACHE_TTL）；`get_redis_client()` lru_cache 单例 + 2s 超时；Redis 不可用 / GET / SETEX 任一抛 → WARNING + 回源 loader（**对调用方完全透明**，spec §5.1 降级模式）；JSON 损坏自愈（DEL + 回源）；`loader()` 返 None 不污染缓存；redis 命令延迟同时上报 `redis_command_latency_seconds`（H2）；10 unit PASS |
+| H2 | Prometheus 指标埋点 | [x] | 2026-05-14 | `src/common/metrics.py` 扩 4 个上下文指标（`context_tokens_per_llm_call` / `context_structured_fields_size` / `context_messages_count` / `context_loop_iterations`，spec §4.2.7）+ 5 个依赖层指标（`db_query_latency_seconds` / `db_pool_checkedout` / `redis_command_latency_seconds` / `milvus_rpc_latency_seconds` / `milvus_rpc_errors_total`，spec §5.2.1 ③）；新增 `src/db/postgres/metrics.py` 订阅 SQLAlchemy `before/after_cursor_execute` 自动产 `db_query_latency_seconds{operation}`，`install_engine_metrics()` 幂等；`infra/prometheus/prometheus.yml` 配 6 个 scrape job（api / prometheus / node-exporter / dcgm-exporter / loki / grafana）；9 unit PASS（指标对象/label/SQLAlchemy event/`/metrics` 端点能拉到所有新增指标） |
+| H3 | Grafana 仪表盘 | [x] | 2026-05-14 | `infra/grafana/datasources/datasources.yml` 自动 provision Prometheus + Loki 两个 datasource（Loki derivedFields 配 trace_id 跳转，对齐 §5.2.1.1 末"日志↔审计联通"）；`infra/grafana/dashboards/dashboards.yml` provider；两个 dashboard JSON：① 应用性能（QPS / 5xx / HTTP P95 / LLM 延迟 P50P95 / 失败重试兜底 / diagnose 失败原因 / context tokens / 循环轮次 / 依赖层 PG·Redis·Milvus）② 硬件资源（CPU / 内存 / 磁盘 / 网络 / GPU 使用率·显存·温度·功耗）；`docker-compose.yml` 补挂 datasources 卷 + 增加 grafana → loki depends_on |
+| H4 | 日志采集（Promtail → Loki） | [x] | 2026-05-14 | `config/logging_config.py` 用 stdlib json 自写 `_MedicalJsonFormatter`（spec §5.2.1.1 强制字段：`timestamp`/`level`/`logger`/`trace_id`/`session_id`/`patient_id`/`node`/`message`/`exc_info`，level 大写、ISO8601-Z timestamp、`extra={}` 透传）；`_ContextVarFilter` 把 ContextVar 注入 `LogRecord`；`configure_logging()` 替换 root + uvicorn handler 幂等；`src/api/middleware/trace_id.py` 入口生成/复用 UUID4，回写 `X-Trace-Id` header；`src/api/app.py` 在 RateLimitMiddleware 之后挂（更外层，让 429 也带 trace_id）；**spec 偏差**：spec 提示用 `python-json-logger`，本实现改用 stdlib（避免 cu128 索引策略冲突），输出字段完全对齐；`infra/promtail/promtail-config.yml` 抓 docker json-file driver stdout，二级 JSON 解析提取 level/node 做 label，trace_id 留正文（避免 Loki 高基数）；`infra/loki/loki-config.yml` 单机 filesystem 存储、保留 90d（对齐 §5.2.3.5）；17 unit PASS |
+| H5 | Node Exporter 硬件监控 | [x] | 2026-05-14 | `docker-compose.yml` 早就配好（`prom/node-exporter:latest`，挂 /proc /sys / 监控宿主机），`docker compose up -d node-exporter` 起来 → `docker exec node-exporter wget -qO- /metrics` 验通拿到 `go_*` 等基础指标；scrape job 加在 prometheus.yml |
+| H5b | DCGM Exporter GPU 监控 | [~] | 2026-05-14 | docker-compose 配置已有；起容器报 "could not select device driver 'nvidia' with capabilities: [[gpu]]" — 宿主机缺 `nvidia-container-toolkit`，需用 `apt install nvidia-container-toolkit && systemctl restart docker` 装上才能跑 |
+| H6 | Redis 缓存与业务层对接 | [x] | 2026-05-14 | `src/db/redis/rate_limit_backend.py` `RedisSlidingWindow` Lua 脚本原子 ZSET 滑动窗口（与 G3 InMemorySlidingWindow 语义对等可热替换；NOSCRIPT 自愈、Redis 不可用 fail-open）；`src/api/middleware/rate_limiter.py` 默认 backend 改为 Redis 版（构造时若不显式传 backend 自动用 Redis）；G3 测试 `_make_app` 显式传 InMemorySlidingWindow 避免串库；动态配置在 H7 走 H1 cache（Cache-Aside 60s 自动生效）；7 unit PASS |
+| H7 | 动态配置管理 | [x] | 2026-05-14 | `src/db/postgres/system_config.py`：`get_dynamic_config(key, default)` 经 H1 cache 读 → 未命中回源 `system_config` 表 → 写回 60s TTL；`set_dynamic_config(key, val, operator_id, ...)` **同事务**写 system_config + ConfigChangeLog（spec §5.3 末），提交后 `invalidate_config()` 失效缓存让全节点最多 60s 切新值；`list_dynamic_configs()` 直读 PG 不走缓存（admin UI 看实时）；`_infer_value_type` 自动推断 `BOOL`(在 INT 之前判)/`INT`/`FLOAT`/`STRING`/`JSON`；docstring 反复提示 `agent_limits` 七常量等不进本表（spec §5.3 分界）；9 unit PASS |
+| H8 | 健康检查端点 | [x] | 2026-05-14 | `src/api/routes/health.py`：`GET /healthz` 零依赖固定 200（即便 PG 挂了也返）；`GET /readyz` `asyncio.wait_for + run_in_executor` 并发探 PG `SELECT 1` + Milvus `has_connection + get_server_version`，2s 超时；任一失败 503 + `failing` 列表；Redis 不可用仍算 ready（spec §5.2.4 / §5.1 降级模式）；docker-compose api 容器 healthcheck 从原 `/health`（不存在）改正为 `/healthz`；nginx 自身 `/nginx-health` 已在；G1 留的 "test_healthz_and_readyz_not_implemented_yet" 占位测试同步删；8 unit PASS |
 
 ### 阶段 I：评估体系
 
@@ -4092,6 +4096,7 @@ flowchart TD
 
 | 编号 | 任务名称 | 状态 | 完成日期 | 备注 |
 |------|---------|------|---------|------|
+| J0 | Docker 化部署 | [x] | 2026-05-14 | `infra/docker/Dockerfile.api`(`uv:python3.12-bookworm-slim` base + `uv sync --frozen` + uvicorn `--proxy-headers`,layer cache 友好,镜像 12GB);`.dockerignore` 排除 `.venv` / `tests/` / `data/` / `infra/{grafana,prometheus,loki,promtail}`(避免 5GB+ 上下文);`docker-compose.yml` api service 加 `environment` 覆盖 `POSTGRES_HOST=postgres` / `MILVUS_HOST=milvus-standalone` / `REDIS_URL=redis://redis:6379`(.env 默认 localhost 是给 host uvicorn 的)+ `deploy.resources.reservations.devices` 透传 GPU(配合 nvidia-container-toolkit);`docker compose up -d api nginx` → api healthcheck `/healthz` 60s 内转绿;端到端验证(2026-05-14):nginx 80 → api 8000 全链路,`/healthz` `/readyz` 200,响应 header 带 `x-trace-id`(H4 中间件工作);Prometheus 6/6 target up(api / dcgm-exporter / grafana / loki / node-exporter / prometheus);触发 30 次 `/readyz` 后 PG `db_query_latency_seconds_count{operation="SELECT"} = 31`(SQLAlchemy event listener H2);api 容器 stdout JSON 日志被 Promtail 推到 Loki,query `{job="docker"} \|= "trace_id"` 命中;`/metrics` 暴露全部 11 个业务指标 family(structured_output_* / context_* / db_query / redis_command / milvus_rpc / diagnose_failure);LLM 相关指标暂时无值,等真跑 `/diagnose` 后会自动出 |
 | J1 | E2E：Ingestion 全链路 | [ ] | | |
 | J2 | E2E：Retrieval 全链路 | [ ] | | |
 | J3 | E2E：Agent 全链路 | [ ] | | |

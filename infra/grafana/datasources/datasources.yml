@@ -1,0 +1,27 @@
+# Grafana datasources provisioning - DEV_SPEC §5.2.2 + H3
+# 启动时由 Grafana 自动 import,无需 UI 手动建。
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
+
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      maxLines: 1000
+      derivedFields:
+        # 日志中的 trace_id 字段 → 一键跳到关联 PG rag_trace 详情(spec §5.2.1.1 末)
+        - matcherRegex: '"trace_id":"([0-9a-f-]+)"'
+          name: trace_id
+          url: 'https://example.invalid/rag_trace/${__value.raw}'
+          urlDisplayLabel: '查看 rag_trace'
