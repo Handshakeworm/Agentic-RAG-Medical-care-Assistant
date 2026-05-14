@@ -46,6 +46,36 @@ _logger = logging.getLogger(__name__)
 _TIER3_SOFT_MATCH_DIST = 0.3  # cosine distance < 0.3 视为同义
 _DIMENSION_QUOTA_MAX = 2  # spec §4.1.2 ⑤ "1~2 个维度"
 
+_PREVIEW_CHUNK_TOP_M = 5      # 维度选择喂 LLM 的 chunk 摘要条数
+_PREVIEW_TEXT_MAX_LEN = 200   # 单条摘要截断长度,防 prompt 膨胀
+
+
+def _preview_chunk_summaries(candidate_chunks: list[dict]) -> list[str]:
+    """从 candidate_chunks 抽 LLM 可读的"候选疾病预览"摘要清单。
+
+    candidate_chunks 形态(spec §3.2.2 多向量聚合):
+        {source_chunk_id, rrf_score, vector_hits: [{vector_type, rank, matched_text}]}
+
+    spec §3.2.3 规则 4 已说明 vector_hits.matched_text 来自 enrichment 阶段 LLM
+    生成(summary / question),"天然带有标题路径上下文",是 chunk 主旨的可读代理。
+    优先取 summary 命中文本,其次 question,最后 original 截断;每 chunk 取 1 条。
+    """
+    out: list[str] = []
+    for c in candidate_chunks[:_PREVIEW_CHUNK_TOP_M]:
+        hits = c.get("vector_hits") or []
+        # 按优先级:summary > question > original
+        chosen: str = ""
+        for vt in ("summary", "question", "original"):
+            for h in hits:
+                if h.get("vector_type") == vt and (h.get("matched_text") or "").strip():
+                    chosen = h["matched_text"].strip()
+                    break
+            if chosen:
+                break
+        if chosen:
+            out.append(chosen[:_PREVIEW_TEXT_MAX_LEN])
+    return out
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # LLM 调用 1:维度缺口选择(中安全等级,失败 → 跳过维度追问)
@@ -276,9 +306,10 @@ def select_discriminative_symptom(state: MedicalState) -> dict:
     # ─── 维度缺口优先 ───
     empty_slots = _empty_slots(state.present_illness_slots)
     dimension_picks: list[str] = []
-    candidate_disease_preview = [
-        c.get("source_chunk_id", "") for c in state.candidate_chunks[:5]
-    ]
+    # spec §4.1.2 ⑤ Step "维度选择":LLM 输入需 candidate_chunks "摘要",而非 chunk_id
+    # 哈希;从 vector_hits.matched_text 抽 chunk 的语义代理(spec §3.2.2 多向量聚合
+    # 副载荷天然带 enrichment summary / question 文本,代表 chunk 主旨)
+    candidate_disease_preview = _preview_chunk_summaries(state.candidate_chunks)
     if empty_slots:
         quota = min(_DIMENSION_QUOTA_MAX, K)
         dimension_picks = _call_dimension_selection(

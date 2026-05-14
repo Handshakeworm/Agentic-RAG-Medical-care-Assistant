@@ -1,12 +1,13 @@
 """tests/unit/test_node_exam_loop.py — F9 检查循环单元测试。
 
-⑧a recommend_exam(自由文本)+ ⑧b wait_exam_report(interrupt)+ ⑨
-process_exam_result(复用 parse_reports)。
+⑧a recommend_exam(结构化 RecommendExamOutput,spec §9.3)+ ⑧b wait_exam_report
+(interrupt)+ ⑨ process_exam_result(复用 parse_reports)。
 """
 from __future__ import annotations
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
+from src.agent.schemas.recommend_exam import RecommendExamOutput
 from src.agent.state import create_initial_state
 
 
@@ -14,13 +15,18 @@ from src.agent.state import create_initial_state
 
 
 @patch("src.agent.nodes.recommend_exam.get_llm")
-def test_recommend_exam_writes_text_and_increments_round(mock_llm_factory):
+def test_recommend_exam_returns_structured_list_and_increments_round(mock_llm_factory):
     from src.agent.nodes.recommend_exam import recommend_exam
 
-    mock_chain = mock_llm_factory.return_value.with_retry.return_value
-    msg = MagicMock()
-    msg.content = "1. 腹部超声(优先,可区分胆囊炎)\n2. 胃镜(可确认溃疡)"
-    mock_chain.invoke.return_value = msg
+    mock_chain = (
+        mock_llm_factory.return_value
+        .with_structured_output.return_value
+        .with_retry.return_value
+    )
+    mock_chain.invoke.return_value = RecommendExamOutput(
+        tests=["腹部超声", "胃镜", "腹部超声"],  # 重复项验证去重
+        rationale="腹部超声优先,可区分胆囊炎;胃镜可确认溃疡",
+    )
 
     s = create_initial_state(patient_id="P", patient_input="x")
     s.diagnosis_result = [
@@ -28,7 +34,26 @@ def test_recommend_exam_writes_text_and_increments_round(mock_llm_factory):
     ]
     update = recommend_exam(s)
     assert update["exam_round"] == 1
-    assert "腹部超声" in update["recommended_tests"][0]
+    # spec §4.1.1 字段定义:list[str] 每项一个检查名,不允许整段塞单元素
+    assert update["recommended_tests"] == ["腹部超声", "胃镜"]
+
+
+@patch("src.agent.nodes.recommend_exam.get_llm")
+def test_recommend_exam_empty_tests_yields_empty_list(mock_llm_factory):
+    """所有所需检查患者已上传报告 → tests 可为空(spec §9.5 RecommendExamOutput)。"""
+    from src.agent.nodes.recommend_exam import recommend_exam
+
+    mock_chain = (
+        mock_llm_factory.return_value
+        .with_structured_output.return_value
+        .with_retry.return_value
+    )
+    mock_chain.invoke.return_value = RecommendExamOutput(tests=[], rationale="已有报告全覆盖")
+
+    s = create_initial_state(patient_id="P", patient_input="x")
+    update = recommend_exam(s)
+    assert update["recommended_tests"] == []
+    assert update["exam_round"] == 1
 
 
 # ⑧b wait_exam_report
