@@ -4,12 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-**This is a spec-driven project in the skeleton stage.** Most files under `src/` are still empty placeholders (verify with `wc -l <file>` before assuming an import works). Real content lives in:
-- `DEV_SPEC.md` (~4600 lines) — the **single source of truth** for architecture, schemas, and acceptance criteria.
+**This is a spec-driven project, developed collaboratively with Claude.** The user makes architectural / trade-off decisions; Claude lands code per spec, runs tests, and reverse-syncs §8.4 progress. Real content lives in:
+- `DEV_SPEC.md` (~4976 lines) — the **single source of truth** for architecture, schemas, and acceptance criteria.
 - Modules already implemented are tracked in DEV_SPEC §8.4 progress table — tasks marked `[x]` correspond to non-empty production modules; `[~]` tasks may have partial code. **Never enumerate "implemented modules" here**; check §8.4.
-- `.claude/skills/auto-coder/` — the workflow that turns DEV_SPEC into code.
-
-Implementation proceeds task-by-task through the `auto-coder` skill (triggered by "auto code" / "自动开发"). It reads the §8.4 progress table in `DEV_SPEC.md`, picks the next `[ ]` task, implements per spec, runs tests, and commits.
+- `.claude/skills/auto-coder/scripts/sync_spec.py` — internal tool; regenerates `references/` (per-chapter spec mirrors) after editing `DEV_SPEC.md`.
+- `.claude/skills/auto-coder/references/*.md` — auto-generated, **never edit by hand**; loaded chapter-by-chapter to avoid sending the full 4976-line spec each turn.
 
 ## Authority hierarchy (read this before resolving any conflict)
 
@@ -18,7 +17,7 @@ Implementation proceeds task-by-task through the `auto-coder` skill (triggered b
 3. Inside §9: the canonical lists win — §9.3 (full LLM-call inventory), §9.5 (full Pydantic schemas), §9.7 (`agent_limits` constants). A call site / field / constant not listed here is a violation, not an oversight.
 4. When DEV_SPEC and existing code disagree, **stop and ask the user** — do not silently pick a side.
 
-## Spec citation discipline (also for interactive coding, not just auto-coder)
+## Spec citation discipline
 
 When implementing or modifying any non-trivial behavior:
 
@@ -161,11 +160,12 @@ Each call site must:
 
 `pytest-asyncio` is included; async tests need the appropriate marker. Integration tests require `docker compose up -d` first.
 
-## When auto-coder fails or stops
+## When to stop and ask the user
 
-The skill stops and asks instead of guessing in three situations:
+Don't guess in these situations — stop and surface:
 1. **Test failure that isn't a clear code bug** — could be a test/spec/environment bug. Don't auto-edit the test or DEV_SPEC; classify with the user first.
-2. **Spec internal conflict** — e.g. §4.1.2 says 13 fields but §9.5 says 12. The skill never silently picks a side.
-3. **Missing prerequisite** — a dependent task in §8.4 is `[ ]`. The skill asks before forging ahead.
+2. **Spec internal conflict** — e.g. §4.1.2 says 13 fields but §9.5 says 12. Never silently pick a side.
+3. **Missing prerequisite** — a dependent task in §8.4 is `[ ]`. Ask before forging ahead.
+4. **Architectural / positioning judgment calls** — anything that changes how the system is described, scoped, or sold (e.g. "is this triage or diagnosis", "do we need this as a standalone feature"). The user owns these.
 
-If you must continue past one of these, the user has to give explicit override.
+If the user has explicitly said to continue past one of these (autonomous mode), proceed and report what you decided.

@@ -5,7 +5,11 @@
   Step 1 NER             — LLM 抽取医学实体(首轮:chief + present_illness;后续轮:
                            仅当 followup_round > last_nlu_round 时对 followup_answer
                            NER,跳过空转)
-  Step 2 Entity Linking  — 每个实体查 terms_collection Top-5 → LLM 选 Top-1;
+  Step 2 Entity Linking  — 三层归一化(**无 LLM**,与 ④ extract_symptoms 同一套):
+                           Tier 1 query_term_by_alias_exact 精确别名命中即用;
+                           Tier 2 search_aliases Top-1,cosine ≥
+                           settings.agent_limits.ENTITY_LINKING_TIER2_THRESHOLD
+                           直接采纳;Tier 3 保留原文(preferred_term=None);
                            按 preferred_term 去重追加到 standardized_entities;
                            首轮把 chief/present 中已链接症状按 negation 分流写入
                            confirmed_symptoms / denied_symptoms
@@ -14,7 +18,7 @@
   Step 4 Query 构建      — LLM 整合 confirmed/slots/report_findings → dense_query;
                            sparse_queries 直接照搬 Step 3 产出
 
-LLM 调用三处(Step 1 NER、Step 2 EL、Step 4 Query),按 §9.1 中安全级模板独立写
+LLM 调用两处(Step 1 NER、Step 4 Query),按 §9.1 中安全级模板独立写
 try/except/finally,各自上报 6 指标。
 """
 from __future__ import annotations
@@ -23,19 +27,19 @@ import json
 import logging
 import time
 
-from src.agent.schemas.entity_linking import (
-    EntityLinkingMatch,
-    EntityLinkingResult,
-)
+from config.settings import settings
+from src.agent.schemas.entity_linking import EntityLinkingMatch
 from src.agent.schemas.ner import NEREntity, NERResult
 from src.agent.schemas.query_construction import QueryConstructionOutput
 from src.agent.state import MedicalState
 from src.common.metrics import _attempts, _failures, _latency, retry_observer
-from src.db.milvus.terms_collection import search_aliases
+from src.db.milvus.terms_collection import (
+    query_term_by_alias_exact,
+    search_aliases,
+)
 from src.models.embedding_model import get_embedding_model
 from src.models.llm_client import get_llm
 from src.prompts.agent import (
-    build_entity_linking_prompt,
     build_ner_prompt,
     build_query_construction_prompt,
 )
@@ -55,9 +59,7 @@ def _call_ner(text: str) -> NERResult:
     _attempts.labels(node=node, schema=schema).inc()
     t0 = time.perf_counter()
     try:
-        chain = get_llm().with_structured_output(
-            NERResult, method="json_mode"
-        ).with_retry(stop_after_attempt=3)
+        chain = get_llm().with_structured_output(NERResult, method="json_mode").with_retry(stop_after_attempt=3)
         return chain.invoke(
             build_ner_prompt(text),
             config={
@@ -78,85 +80,67 @@ def _call_ner(text: str) -> NERResult:
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Step 2: 单实体 Entity Linking 调用包装(裸 §9.1 模板)
+# Step 2: Entity Linking — 三层归一化(无 LLM,与 ④ extract_symptoms 同设计)
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def _call_entity_linking(
-    original_text: str, candidates: list[dict]
-) -> EntityLinkingMatch:
-    """单实体 LLM 选 Top-1。失败→退化为"无匹配"占位(spec §9.3:单实体失败不阻塞其他)。"""
-    node, schema = "build_query_step2_entity_linking", "EntityLinkingResult"
-    _attempts.labels(node=node, schema=schema).inc()
-    t0 = time.perf_counter()
+def _link_one_entity(text: str, embed) -> EntityLinkingMatch:
+    """三层归一化单实体。Tier 1 精确 → Tier 2 向量阈值 → Tier 3 占位。
+
+    阈值来源 §9.7 `ENTITY_LINKING_TIER2_THRESHOLD`(默认 0.92,可 .env 覆盖,
+    评测调优后微调)。
+    """
+    text = text.strip()
+    if not text:
+        return EntityLinkingMatch(
+            original_text=text, concept_id=None, preferred_term=None, confidence=0.0
+        )
+
+    # ─── Tier 1: 精确别名匹配 ───
     try:
-        chain = get_llm().with_structured_output(
-            EntityLinkingResult, method="json_mode"
-        ).with_retry(stop_after_attempt=3)
-        result: EntityLinkingResult = chain.invoke(
-            build_entity_linking_prompt(original_text, candidates),
-            config={
-                "callbacks": [retry_observer],
-                "metadata": {"node": node, "schema": schema},
-            },
-        )
-        if result.matches:
-            return result.matches[0]
-        return EntityLinkingMatch(
-            original_text=original_text,
-            concept_id=None,
-            preferred_term=None,
-            confidence=0.0,
-        )
+        hit = query_term_by_alias_exact(text)
     except Exception as e:
-        _failures.labels(
-            node=node, schema=schema, exception_type=type(e).__name__
-        ).inc()
-        _logger.warning(
-            "[%s] entity linking failed for '%s': %s",
-            node, original_text, e,
-        )
-        # 单实体失败 → 保留原文,继续其他实体(spec §9.3)
+        _logger.debug("Tier1 alias query failed for '%s': %s", text, e)
+        hit = None
+    if hit is not None:
         return EntityLinkingMatch(
-            original_text=original_text,
-            concept_id=None,
-            preferred_term=None,
-            confidence=0.0,
-        )
-    finally:
-        _latency.labels(node=node, schema=schema).observe(
-            time.perf_counter() - t0
+            original_text=text,
+            concept_id=hit["concept_id"],
+            preferred_term=hit["preferred_term"],
+            confidence=1.0,
         )
 
+    # ─── Tier 2: 向量检索 + 阈值 ───
+    try:
+        vec = embed.encode_one(text)
+        candidates = search_aliases(query_vector=vec, top_k=1)
+    except Exception as e:
+        _logger.debug("Tier2 vector search failed for '%s': %s", text, e)
+        candidates = []
 
-def _link_entities(
-    entities: list[NEREntity], top_k: int = 5
-) -> list[EntityLinkingMatch]:
-    """对每个 NER 实体查 terms_collection Top-K → LLM 选 Top-1。"""
-    matches: list[EntityLinkingMatch] = []
+    if candidates:
+        top = candidates[0]
+        threshold = settings.agent_limits.ENTITY_LINKING_TIER2_THRESHOLD
+        if top.get("score", 0.0) >= threshold and top.get("preferred_term"):
+            return EntityLinkingMatch(
+                original_text=text,
+                concept_id=top["concept_id"],
+                preferred_term=top["preferred_term"],
+                confidence=float(top["score"]),
+            )
+
+    # ─── Tier 3: 保留原文 ───
+    return EntityLinkingMatch(
+        original_text=text, concept_id=None, preferred_term=None, confidence=0.0
+    )
+
+
+def _link_entities(entities: list[NEREntity]) -> list[EntityLinkingMatch]:
+    """三层归一化批量 EL,无 LLM。Tier 2 向量检索复用 embedding model 单例。"""
     if not entities:
-        return matches
+        return []
     embed = get_embedding_model()
-    for ent in entities:
-        try:
-            vec = embed.encode_one(ent.text)
-            candidates = search_aliases(query_vector=vec, top_k=top_k)
-        except Exception as e:
-            _logger.warning(
-                "terms_collection search failed for '%s': %s — skipping linking",
-                ent.text, e,
-            )
-            matches.append(
-                EntityLinkingMatch(
-                    original_text=ent.text,
-                    concept_id=None,
-                    preferred_term=None,
-                    confidence=0.0,
-                )
-            )
-            continue
-        matches.append(_call_entity_linking(ent.text, candidates))
-    return matches
+    return [_link_one_entity(ent.text, embed) for ent in entities]
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -170,15 +154,12 @@ def _call_query_construction(
     report_positive: list[str],
     report_impressions: list[str],
     filled_slots: dict,
-    sparse_queries_preview: list[str],
 ) -> QueryConstructionOutput:
     node, schema = "build_query_step4_query", "QueryConstructionOutput"
     _attempts.labels(node=node, schema=schema).inc()
     t0 = time.perf_counter()
     try:
-        chain = get_llm().with_structured_output(
-            QueryConstructionOutput, method="json_mode"
-        ).with_retry(stop_after_attempt=3)
+        chain = get_llm().with_structured_output(QueryConstructionOutput, method="json_mode").with_retry(stop_after_attempt=3)
         return chain.invoke(
             build_query_construction_prompt(
                 confirmed_symptoms=confirmed_symptoms,
@@ -186,7 +167,6 @@ def _call_query_construction(
                 report_positive=report_positive,
                 report_impressions=report_impressions,
                 filled_slots=filled_slots,
-                sparse_queries_preview=sparse_queries_preview,
             ),
             config={
                 "callbacks": [retry_observer],
@@ -334,7 +314,6 @@ def build_query(state: MedicalState) -> dict:
         report_positive=report_pos,
         report_impressions=report_imp,
         filled_slots=filled_slots,
-        sparse_queries_preview=sparse_queries,
     )
 
     update = {
@@ -342,8 +321,8 @@ def build_query(state: MedicalState) -> dict:
         "confirmed_symptoms": confirmed_symptoms,
         "denied_symptoms": denied_symptoms,
         "dense_query": qc.dense_query,
-        # 以确定性产出的 sparse_queries 为准(LLM 输出仅做 schema 占位,防止它瞎改)
-        "sparse_queries": sparse_queries or qc.sparse_queries,
+        # sparse_queries 由 Step 3 确定性产出,LLM 不参与(详见 QueryConstructionOutput docstring)
+        "sparse_queries": sparse_queries,
     }
 
     # NER 已执行 → 推进游标(spec §4.1.2 ② Step 1)

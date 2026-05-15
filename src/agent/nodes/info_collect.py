@@ -38,9 +38,7 @@ def info_collect(state: MedicalState) -> dict:
     _attempts.labels(node=_NODE, schema=_SCHEMA).inc()
     t0 = time.perf_counter()
     try:
-        chain = get_llm().with_structured_output(
-            InfoCollectOutput, method="json_mode"
-        ).with_retry(stop_after_attempt=3)
+        chain = get_llm().with_structured_output(InfoCollectOutput, method="json_mode").with_retry(stop_after_attempt=3)
         result: InfoCollectOutput = chain.invoke(
             prompt,
             config={

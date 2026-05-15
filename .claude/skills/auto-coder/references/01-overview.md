@@ -4,7 +4,7 @@
 
 ## 1.1 项目亮点：
 
-开发过程使用了 Claude Code SKILL 进行自动开发、测试：在 `.claude/skills/` 中维护 `auto-coder` 与 `skill-creator` 等开发辅助技能，帮助规范驱动开发、自动化测试与打包。
+**Spec-driven 协作开发**：本 `DEV_SPEC.md` 是单一事实源（架构 / schema / §8.4 进度表 / §9 全局契约），由作者主导架构与取舍判断，与 Claude 协作完成快速实现。`.claude/skills/auto-coder/scripts/sync_spec.py` 是配套内部工具，按章节生成 `references/` 镜像，供 Claude 按章节加载，避免一次塞 4976 行进上下文。
 
 
 深入实际业务场景，根据业务场景进行优化，听取了经验丰富主任医师的意见进行多次商讨
@@ -69,7 +69,7 @@
    8.3 详细排期
    8.4 进度跟踪表
 
-9. 全局实现契约（跨章节，auto-coder 必读）
+9. 全局实现契约（跨章节，实现前必读）
    9.1 统一机制（with_structured_output + 重试 + 分级失败处理）
    9.2 Schema 演进兼容性
    9.3 全量结构化输出清单
@@ -149,7 +149,7 @@ Agentic-RAG-Medical-care-Assistant/
 │   │   │   ├── info_collect.py         # InfoCollectOutput
 │   │   │   ├── report_parser.py        # ReportFinding, ReportFindings
 │   │   │   ├── ner.py                  # NEREntity, NERResult
-│   │   │   ├── entity_linking.py       # EntityLinkingMatch, EntityLinkingResult
+│   │   │   ├── entity_linking.py       # EntityLinkingMatch（三层归一化返回结构，零 LLM）
 │   │   │   ├── query_construction.py   # QueryConstructionOutput
 │   │   │   ├── symptom_selection.py    # DimensionSelection, AskabilityJudgment
 │   │   │   ├── followup.py             # FollowupParseResult

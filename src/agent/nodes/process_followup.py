@@ -86,9 +86,7 @@ def process_followup_answer(state: MedicalState) -> dict:
     _attempts.labels(node=_NODE, schema=_SCHEMA).inc()
     t0 = time.perf_counter()
     try:
-        chain = get_llm().with_structured_output(
-            FollowupParseResult, method="json_mode"
-        ).with_retry(stop_after_attempt=3)
+        chain = get_llm().with_structured_output(FollowupParseResult, method="json_mode").with_retry(stop_after_attempt=3)
         result: FollowupParseResult = chain.invoke(
             prompt,
             config={

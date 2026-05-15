@@ -42,26 +42,23 @@
 
 | 层 | 我做了什么 |
 |---|---|
-| 数据工程 | MinerU 解析 13 本医学教材(13912 页 / 264948 block)→ 父子分块(2026-05 POC,12 本 mismatch=0)→ LLM enrichment(child + table + figure 三路 26054 chunks)→ 多向量化入 Milvus(129810 entities) |
-| ML 推理 | Qwen3-Embedding-8B INT8 + BGE-Reranker-v2-minicpm INT8 共显单卡(16GB),Reranker 走 layerwise 早退,失败/超时 fallback RRF 原序 |
-| Agent | LangGraph 16 节点 + 2 条件路由,内置追问 / 复检两个 `interrupt`/`resume` 闭环,纯函数路由 + 节点收敛状态变更 |
-| 后端 | FastAPI + JWT + bcrypt + 滑动窗口限流(协议抽象,可切 Redis)+ 角色守卫;PostgreSQL 20 表 + Alembic 迁移 + 同事务双写审计 |
-| 基础设施 | Docker Compose 13 容器编排(Milvus + PG + Redis + Prometheus + Grafana + Loki + Promtail + Node/DCGM Exporter + Nginx)+ Nginx `X-Real-IP` 透传保限流可用 |
-| 工程过程 | Spec-driven 开发,4976 行 DEV_SPEC 为单一事实源;`.claude/skills/auto-coder/` 自研 skill 把 spec 转换为可执行任务;CLAUDE.md 锚定契约红线 |
+| 数据处理 / RAG | • MinerU 解析 13 本医学教材(264948 文档块),每本教科书专配一套脚本精细化清洗切分<br>• 父子两级分块:外层按章节切出父块、内层按 token 切出子块 (12/13 本零边界丢失)<br>• 每块产出原文 + LLM enrichment 摘要 + LLM enrichment 3个假设患者问题, + BM25 倒排,共 26054 块 / 129810 向量入 Milvus<br>• 先 PG 后 Milvus 双写,幂等可重跑 + 自动清理孤儿块 |
+| Embedding / Reranker | • Qwen3-Embedding-8B(8.5GB)+ BGE-Reranker-v2-minicpm-layerwise(2.6GB) INT8 量化单卡 16GB 共显<br>• 精排 layerwise 早退加速;失败 / 超时回退到召回原序 |
+| Agent | • LangGraph 16 节点 + 2 条件分支组织成状态机<br>• **13 维 HPI 结构化主动问诊**:候选范围按 `空维度优先填 → TF-IDF 抽 chunk 关键词归一化 → 二元熵信息增益贪心选剩余症状 → LLM 可问性评估滤掉必须查体的体征 → 增益 < 0.15 阈值早退转诊断` 逐轮收敛,而非被动等用户描述<br>• 两段暂停等待用户输入(多轮澄清病史 / 上传补充检查报告)<br>• 诊断三步串联(证据 → 排序 → 输出),任一步多次重试失败就早停告知"信息不足以确诊"<br>• 最终输出经独立安全过滤,规避处方剂量与确诊口吻<br>• **LLM 按能力路由**:主链 DeepSeek 跑文本 14 处结构化输出,多模态分支 DashScope qwen3.5-plus 跑报告解析 |
+| 后端 | • FastAPI + JWT 实现注册 / 登录 / 角色守卫<br>• 限流先抽象后实现:单机内存版可换多副本 Redis 共享版,业务代码不动<br>• PostgreSQL 20 表 + Alembic 6 次迁移<br>• 每次问诊同事务写响应 + 15 字段审计链路(90 天保留) |
+| 基础设施 | • Docker Compose 13 容器一键启动<br>• Prometheus 6 监控目标 + 11 类业务指标(LLM 健康度 / 上下文长度 / PG·Redis·Milvus 三层依赖)<br>• Grafana 启动自动加载 2 仪表盘(应用 + 硬件);日志面板点击跳数据库审计详情<br>• 每请求一个 trace ID 串日志 / 审计 / 监控三路<br>• **基础设施降级哲学**:Redis 挂回源 PG / 限流 fail-open / Reranker 超时回退原序,故障半径控死在一层 |
+| 工程过程 | • Spec-driven 协作开发:[DEV_SPEC.md](DEV_SPEC.md) 唯一事实源,[CLAUDE.md](CLAUDE.md) 锚定开发红线<br>• 我做架构与取舍判断,Claude 落地代码 + 反向同步 §8.4 进度<br>• 测试 355 单元 + 71 集成 PASS |
 
-### 2. 多路 RRF 自调节权重
+### 2. 多路检索 + 多向量索引(单阶段 RRF)
 
-不是常见的"先 dense 再 sparse 后 rerank"流水,而是 **单阶段多路 RRF**:
+不是常见的"先 dense 再 sparse 后 rerank"流水,而是召回阶段同时玩两个维度的"多":
 
+**多路 RRF**(按症状维度拆 query):
 - Sparse 路按症状维度拆 — N 个症状维度词袋 = N 次独立 BM25(不是把所有词拼成 1 个 query)
 - Dense 路只 1 次 ANN
-- 全部展开成 (N+1) 路一起做 RRF
+- (N+1) 路一起做 RRF 融合,某 chunk 命中维度越多权重越大 — **跨模态权重自调节,不需要手调 dense:sparse 比例**
 
-效果:某 chunk 命中维度越多,获得的 `1/(k+rank)` 求和越大 — **跨模态权重自调节,不需要手调 dense:sparse 比例**。详见 [DEV_SPEC §3.2.2](DEV_SPEC.md#322-召回)。
-
-### 3. 多向量索引 + 字段召回画像
-
-每个 chunk 入库 1 original + 1 summary + 3 hypothetical question 向量(共约 5 倍膨胀):
+**多向量索引**(每个 chunk 入库 5 路向量):
 
 | vector_type | 主要捕获 | 弥合 |
 |---|---|---|
@@ -69,9 +66,9 @@
 | `summary` | 方法论 / 综述类查询 | "X 是什么 / 用来干嘛" |
 | `question` × 3 | 患者口语 + 场景化代入 | "我爸爸喘得厉害爬楼困难" |
 
-设计哲学:**单条向量的任务不是回答 query,只是让 chunk 进入 Top-200 候选池**,Reranker 看完整 `chunk_raw_text` 重排,与命中哪条向量无关。详见 [DEV_SPEC §3.1.5.1](DEV_SPEC.md#3151-字段召回画像enrichment-字段如何被召回命中)。
+**单条向量的任务不是回答 query,只是让 chunk 进入 Top-200 候选池**;Reranker 看完整 `chunk_raw_text` 重排,与命中哪条向量无关。详见 [DEV_SPEC §3.2.2 / §3.1.5.1](DEV_SPEC.md#322-召回)。
 
-### 4. Small-to-Big 父子索引
+### 3. Small-to-Big 父子索引
 
 医疗知识天然分层(疾病 → 亚型 → 治疗方案 → 剂量/禁忌)。小块精确命中"剂量"时禁忌可能在同节另一小块,直接送 LLM 会**危险遗漏**。本项目:
 
@@ -82,11 +79,11 @@
 
 详见 [DEV_SPEC §3.1.2](DEV_SPEC.md#312-chunking目录权威清单--三遍切--size-驱动子块)。
 
-### 5. 单卡共显错峰
+### 4. 单卡 16GB 共显 Embedding + Reranker
 
-RTX 5070 Ti 16GB 同时承载 Embedding 8B INT8(~8.5GB)+ Reranker 2.4B INT8(~2.6GB),共 ~11GB,留约 4.6GB 给推理激活值。可行性建立在 **负载天然错峰**:Embedding 在文档摄取时批跑,Reranker 在用户查询时实时跑。LLM 走云端 API(DeepSeek + DashScope)不占 GPU。详见 [DEV_SPEC §2.1 / §2.3](DEV_SPEC.md#21-embedding-模型选型)。
+RTX 5070 Ti 16GB 同时承载 Embedding 8B(~8.5GB)+ Reranker 2.4B(~2.6GB),靠 **bitsandbytes INT8 量化**把两个模型压到 ~11GB,留 4.6GB 给推理激活值。LLM 推理走云端 API(DeepSeek 主链 + DashScope 多模态)不占 GPU,所以 16GB 全留给本地两个 Encoder 模型。详见 [DEV_SPEC §2.1 / §2.3](DEV_SPEC.md#21-embedding-模型选型)。
 
-### 6. 多模态摄取流水线(文本 + 表格 + 图表)
+### 5. 多模态摄取流水线(文本 + 表格 + 图表)
 
 不是只切文本 — `chunks` 表用 **单行多列 + chunk_type** 设计统一容纳三类:
 
@@ -96,17 +93,55 @@ RTX 5070 Ti 16GB 同时承载 Embedding 8B INT8(~8.5GB)+ Reranker 2.4B INT8(~2.6
 
 图表 chunk 共享父块的 `heading_path_id`,在召回时通过 **同节图表跟随父块**(规则 3,封顶 5 条)的回拉机制保证图表必然被带出来。详见 [DEV_SPEC §3.1.2 / §3.2.3](DEV_SPEC.md#312-chunking目录权威清单--三遍切--size-驱动子块)。
 
-### 7. 三层幂等 + 补偿,而非分布式事务
+### 6. LLM 按能力路由(主链 + 多模态分流)
 
-写库顺序 PG → Milvus 串行,**不并行**(没有共享事务协调器)。`embedding_status` 字段(`pending → done / failed / skip`)兼任两阶段状态机:
+不是一个 LLM 干所有事 — 按"调用是否要看图片"分流:
 
+- **主链 DeepSeek**(文本推理便宜):14 处结构化输出(意图识别 / 症状提取 / 鉴别诊断 / 安全过滤等)
+- **多模态分支 DashScope qwen3.5-plus**:初诊报告解析、检查报告解析(看患者上传的 PDF / 影像截图)
+
+省钱(主链 ~5× 便宜)+ 该用多模态时不阉割能力。
+
+### 7. 鲁棒性:写入幂等 + 运行时降级
+
+承认基础设施会挂,在两个时间窗口都设计明确的容错路径:
+
+**摄取期写入幂等**(PG → Milvus 串行,无共享事务协调器):
 - PG 写失败 → 整批回滚,无脏数据
 - Milvus 写失败 → PG 标 `failed`,补偿任务定期扫描差集重写
-- chunk_id 由 `SHA256(source_id : heading_path_id : relative_chunk_index)` 生成,Milvus 派生 ID(`{chunk_id}_q{n}`),**所有 upsert 全程幂等**
+- `chunk_id` 由 `SHA256(source_id : heading_path_id : relative_chunk_index)` 生成,**所有 upsert 全程幂等**
 
-详见 [DEV_SPEC §3.1.4 / §3.1.6](DEV_SPEC.md#314-幂等性设计idempotency)。
+**运行时降级**(基础设施抖动不连累业务):
+- **Redis 挂** → 配置缓存回源 PostgreSQL,`/readyz` 仍 ready
+- **Redis 限流挂** → fail-open 放行(限流是 best-effort 防滥用)
+- **Reranker 超时** → fallback 召回原序(降级排序不致命)
 
-### 8. 三步诊断链 + 整链路兜底
+不写无止境重试,**故障半径控死在一层**。详见 [DEV_SPEC §3.1.4 / §3.1.6](DEV_SPEC.md#314-幂等性设计idempotency)。
+
+### 8. 13 维 HPI 结构化主动问诊
+
+不是被动等用户自由描述,按医学**现病史 13 维 schema**(`PresentIllnessSlots`)主动追问:
+
+| 维度 | 字段 | 维度 | 字段 |
+|---|---|---|---|
+| 起病时间 | `onset_time` | 加重因素 | `aggravating` |
+| 起病方式 | `onset_mode` | 缓解因素 | `relieving` |
+| 诱因 | `trigger` | 伴随症状 | `associated_symptoms` |
+| 部位 | `location` | 病程演变 | `progression` |
+| 性质 | `nature` | 诊疗经过 | `treatment_tried` |
+| 程度 | `severity` | 治疗反应 | `treatment_response` |
+| 时间规律 | `duration_pattern` | | |
+
+**逐轮缩小候选范围的 4 步算法**(节点 ⑤ `select_discriminative_symptom`):
+
+1. **空维度优先(配额 ≤ 2)**:对比已填 vs 未填 13 维,LLM 选最有鉴别价值的空维度先问
+2. **关键词归一化(④ `extract_symptoms`,零 LLM)**:`sklearn TfidfVectorizer` char_wb 2-4 gram 抽 RAG 召回 chunk 的 TF-IDF Top-30 关键词 → 三层归一化(精确别名 → 向量 cosine ≥ 0.92 → 占位)
+3. **二元熵信息增益贪心**:对剩余症状按二元熵排序候选,逐个 LLM 评估"患者能自述 vs 必须查体"(可问性),不能问的进 `unaskable_symptoms` 留诊断节点参考
+4. **阈值早退**:症状级最高增益 < `ASKABLE_GAIN_THRESHOLD = 0.15`(§9.7)→ 清空追问 → 转 ⑩ `diagnose`;追问轮次也有硬上限 `MAX_FOLLOWUP_ROUNDS = 8` 兜底
+
+医学侧的产品差异化 — 自由文本 LLM 助手做不到这种结构化主诉收敛。
+
+### 9. 三步诊断链 + 整链路兜底
 
 ⑩ `diagnose` 节点做的不是"一次 LLM 出诊断",而是 **三步链**:
 
@@ -116,7 +151,7 @@ RTX 5070 Ti 16GB 同时承载 Embedding 8B INT8(~8.5GB)+ Reranker 2.4B INT8(~2.6
 
 任一步重试 3 次仍失败 → 整链短路到 `insufficient` 并写 `failure_reason="step_{N}_structured_output_failed: ..."`,**不允许把部分/空的中间结果喂给下一步**。⑩ 还有 Step -1 在 `followup_round >= MAX_FOLLOWUP_ROUNDS` 时直接短路。详见 [DEV_SPEC §4.1.2 ⑩](DEV_SPEC.md#41-agent工作流) + [§9.1 / §9.3](DEV_SPEC.md#9-全局实现契约跨章节)。
 
-### 9. Safety Gate 作为硬性安全闸
+### 10. Safety Gate 作为硬性安全闸
 
 ⑪ `safety_gate` 不是事后检查,而是 ⑩ → ⑫ 之间的硬性闸口:
 
@@ -124,34 +159,15 @@ RTX 5070 Ti 16GB 同时承载 Embedding 8B INT8(~8.5GB)+ Reranker 2.4B INT8(~2.6
 - LLM 兜底:判断交叉过敏、妊娠/哺乳禁忌、药物相互作用
 - 失败保守追加通用警告 — **绝不让 ⑫ 在缺少 `safety_constraints` 的情况下生成用药建议**
 
-### 10. 全链路审计 — `rag_trace` 15 字段
+### 11. 全链路审计 — `rag_trace` 15 字段
 
-每轮诊断在 PG 写入一行 `rag_trace`,含:
+每轮诊断在 PG 写入一行 `rag_trace`(15 字段含检索 / 重排 / 失败原因 / token / 各阶段延时,JSONB,90 天保留,GIN 索引按 chunk_id 反查影响面)。
 
-- `retrieved_chunks` / `reranked_chunks`(JSONB)
-- `final_prompt` / `llm_raw_output`(失败兜底路径才填)
-- `failure_reason` / `differentiation_type`
-- `token_usage`(prompt/completion/total)
-- `latency_ms`(intent/retrieval/rerank/llm_call/post_process/total)
-- 90 天保留,GIN 索引支持按 chunk_id 反查影响面
+实现风格刻意没有装饰器 / helper,每个调用点裸写 try/except + 6 个 Prometheus 指标手动 `.inc()` / `.observe()` — 让重试与失败路径在代码里**显式可见**。详见 [DEV_SPEC §9.1 / §9.6](DEV_SPEC.md#9-全局实现契约跨章节)。
 
-实现风格刻意没有装饰器/helper,每个调用点裸写 try/except + 6 个 Prometheus 指标手动 `.inc()`/`.observe()` — 让重试与失败路径在代码里**显式可见**。详见 [DEV_SPEC §9.1 / §9.6](DEV_SPEC.md#9-全局实现契约跨章节)。
+### 12. 运行时常量集中管理(§9.7 `agent_limits`)
 
-### 11. 运行时常量集中管理(§9.7 `agent_limits`)
-
-所有阈值/上限统一在 `pydantic_settings.BaseSettings`,环境变量前缀 `AGENT_`:
-
-| 常量 | 默认值 | 用途 |
-|---|---|---|
-| `MAX_FOLLOWUP_ROUNDS` | 8 | 追问硬上限 |
-| `MAX_EXAM_ROUNDS` | 3 | 复检硬上限 |
-| `MAX_FOLLOWUP_QUESTIONS` | 5 | 单轮追问问题数 |
-| `RETRIEVE_TOP_N` | 200 | RRF 后截断 |
-| `ASKABLE_GAIN_THRESHOLD` | 0.15 | 可问性增益下限 |
-| `ENTITY_LINKING_TIER2_THRESHOLD` | 0.92 | terms_collection cosine 阈值 |
-| `RERANKER_CUTOFF_LAYERS` | None(= 全 40 层) | layerwise 早退层数 |
-
-业务代码必须 `from config.settings import settings` 读取,**禁止模块级 `MAX_X = 8`**。调参改 `.env` 不改代码。
+7 个阈值与硬上限(追问 / 复检轮次封顶、RRF 截断、信息增益门槛、实体链接相似度、Reranker 早退层数等)统一在 `pydantic_settings.BaseSettings`,环境变量前缀 `AGENT_*` 可调,业务代码必须 `from config.settings import settings` 读取,**禁止模块级 `MAX_X = 8`**。调参改 `.env` 不改代码。完整清单见 [DEV_SPEC §9.7](DEV_SPEC.md#9-全局实现契约跨章节)。
 
 ---
 
@@ -572,7 +588,7 @@ docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d nginx
 
 1. **写代码前先定位 spec 章节**,代码 docstring 引用 `DEV_SPEC §X.Y`。无 spec 章节先与用户确认,不要凭空发明设计。
 2. **触碰 LLM 调用 / Schema / 运行时常量 / 审计写入**时,先扫 §9 全局契约。详见 [CLAUDE.md](CLAUDE.md) "Sweep §9 before implementing"。
-3. **修 spec 后必须跑** `python .claude/skills/auto-coder/scripts/sync_spec.py` 同步 `.claude/skills/auto-coder/references/`。**不要直接编辑** `references/*.md`,会被覆盖。
+3. **修 spec 后跑** `python .claude/skills/auto-coder/scripts/sync_spec.py` 同步章节镜像 `references/`(供 Claude 按章节加载,避免一次塞 4976 行)。**不要直接编辑** `references/*.md`,会被覆盖。
 4. **添加依赖改 `pyproject.toml`** + `uv sync`,不要直接 `uv pip install`(环境不可复现)。
 5. **常量集中**:业务代码 `from config.settings import settings` 读 `settings.agent_limits.X`,**禁止** `MAX_X = 8` 模块级常量。
 6. **测试位置**:所有 `test_*.py` 必须在 `tests/{unit,integration,e2e}/` 下,不要散落到 `scripts/`。重资源测试用 `pytestmark = pytest.mark.skipif(...)` 不要移出 tests。

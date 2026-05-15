@@ -113,6 +113,10 @@ class LLMSettings(BaseSettings):
         description="LLM API 密钥,必须由 .env 提供;缺失时立即抛 ValidationError(DEV_SPEC §8.3 A3)",
     )
     MODEL_NAME: str = "deepseek-v4-pro"
+    # thinking 模型 max_tokens 不设会"放飞自我"用满 default 上限,单次延迟拖到
+    # 100s+;参考 enrichment.py 设 800 跑得很快。2048 是业务侧折中(含 thinking
+    # 用完、JSON 输出 schema 嵌套较大也够),.env LLM_MAX_TOKENS 可覆盖。
+    MAX_TOKENS: int = 2048
 
     # 多模态分支(F2.5 / F9 报告解析专用)
     VISION_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"

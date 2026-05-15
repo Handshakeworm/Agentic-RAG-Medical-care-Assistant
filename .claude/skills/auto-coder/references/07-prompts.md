@@ -29,7 +29,6 @@
 | `build_info_collect_prompt` | ① | 从 patient_input 提取主诉 + 现病史自由文本 + 现病史结构化槽位（`present_illness_slots`，13 个维度同步填充） |
 | `build_exam_report_reading_prompt` | ①⑨ | 多模态理解检验单/影像报告（文字+图像+PDF），返回结构化摘要 |
 | `build_ner_prompt` | ② | 从新增文本中抽取医疗实体（症状/疾病/药物/解剖），含否定标记与时序 |
-| `build_entity_linking_prompt` | ② | Entity Linking 核心调用：LLM 从 Embedding 检索到的 Top-5 候选术语中选出最匹配项（或判定"无匹配"），输出 concept_id / preferred_term / confidence（仅 ② 使用；④ 的归一化走确定性 Tier 1/2 + Tier 3 保留原文，零 LLM） |
 | `build_query_construction_prompt` | ② | 基于标准化实体构造 Dense / Sparse 双路查询 |
 | `build_dimension_selection_prompt` | ⑤ | 从 `present_illness_slots` 空槽中选出 1~2 个对当前候选疾病鉴别最有价值的维度（输入：chief_complaint + 空槽列表 + candidate_chunks 摘要） |
 | `build_askability_prompt` | ⑤ | 判断高信息增益症状是否"患者可自述"（可询问）或"需要体格检查"（不可询问） |

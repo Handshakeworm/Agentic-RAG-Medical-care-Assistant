@@ -23,10 +23,6 @@ from src.agent.schemas.diagnosis import (
     EvidenceSheet,
     RankedDisease,
 )
-from src.agent.schemas.entity_linking import (
-    EntityLinkingMatch,
-    EntityLinkingResult,
-)
 from src.agent.schemas.info_collect import (
     InfoCollectOutput,
     PresentIllnessSlots as SchemaSlots,
@@ -48,6 +44,10 @@ def stub_dbs():
         patch(
             "src.agent.nodes.info_collect.load_initial_exam_reports",
             return_value=[],
+        ),
+        patch(
+            "src.agent.nodes.build_query.query_term_by_alias_exact",
+            return_value={"concept_id": "R10.4", "preferred_term": "腹痛"},
         ),
         patch(
             "src.agent.nodes.build_query.search_aliases",
@@ -182,17 +182,9 @@ def test_normal_confirmed_path(stub_dbs):
         NERResult(entities=[
             NEREntity(text="腹痛", entity_type="symptom", negation=False),
         ]),
-        # ② EL
-        EntityLinkingResult(matches=[
-            EntityLinkingMatch(
-                original_text="腹痛", concept_id="R10.4",
-                preferred_term="腹痛", confidence=0.95,
-            )
-        ]),
+        # ② EL: 三层归一化(无 LLM,Tier 1 走 query_term_by_alias_exact mock 命中)
         # ② Query
-        QueryConstructionOutput(
-            dense_query="进食后上腹胀痛", sparse_queries=["腹痛"]
-        ),
+        QueryConstructionOutput(dense_query="进食后上腹胀痛"),
         # ⑤ select_symptom: slots 全填,无维度选择;extracted_symptoms 为空
         # (extract_symptoms 在没有 chunks_text 关键词时返回空) → 也无 askability
         # ⑩ diagnose Step 1 / 2 / 3
@@ -290,7 +282,7 @@ def test_followup_round_capped_path(stub_dbs):
         ),
         # ② build_query:check path(followup_round == last_nlu_round 且非首轮)→
         #     跳 NER + EL,只跑 Step 4 Query 构建
-        QueryConstructionOutput(dense_query="x", sparse_queries=["x"]),
+        QueryConstructionOutput(dense_query="x"),
         # ⑤ select_symptom 已被 stub 替代(无 LLM 调用)
         # ⑩ Step -1 触顶,跳过 LLM(0 个)
         # ⑪ safety_gate

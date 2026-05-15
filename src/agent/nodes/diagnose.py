@@ -384,15 +384,9 @@ def diagnose(state: MedicalState) -> dict:
         api_key=settings.llm.VISION_API_KEY,
     )
     main_llm = get_llm()
-    evidence_chain = vision_llm.with_structured_output(
-        EvidenceSheet, method="json_mode"
-    ).with_retry(stop_after_attempt=3)
-    ranking_chain = main_llm.with_structured_output(
-        DiagnosisRanking, method="json_mode"
-    ).with_retry(stop_after_attempt=3)
-    calibration_chain = main_llm.with_structured_output(
-        DiagnosisOutput, method="json_mode"
-    ).with_retry(stop_after_attempt=3)
+    evidence_chain = vision_llm.with_structured_output(EvidenceSheet).with_retry(stop_after_attempt=3)
+    ranking_chain = main_llm.with_structured_output(DiagnosisRanking, method="json_mode").with_retry(stop_after_attempt=3)
+    calibration_chain = main_llm.with_structured_output(DiagnosisOutput, method="json_mode").with_retry(stop_after_attempt=3)
 
     history_summary = json.dumps(state.medical_history, ensure_ascii=False)[:600]
     slots_dict = state.present_illness_slots.model_dump()

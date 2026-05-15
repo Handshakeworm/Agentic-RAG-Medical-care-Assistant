@@ -91,10 +91,14 @@ def search_dense(
         expr_parts.append(f'vector_type == "{vector_type_filter}"')
     expr = " and ".join(expr_parts) if expr_parts else None
 
+    # HNSW 硬性约束:ef ≥ k(limit),否则 Milvus 直接报 "ef should be larger than k"。
+    # 64 作为下限保留小查询(top_k≤32)的原默认行为;大 top_k 时按 2× 扩展候选池
+    # 兼顾召回质量(spec §3.2.2:RETRIEVE_TOP_N=200,这里 ef=400)。
+    ef = max(64, top_k * 2)
     raw = coll.search(
         data=[query_vector],
         anns_field="dense_vector",
-        param={"metric_type": "COSINE", "params": {"ef": 64}},
+        param={"metric_type": "COSINE", "params": {"ef": ef}},
         limit=top_k,
         expr=expr,
         output_fields=["id", "source_chunk_id", "vector_type", "original_content", "source_id"],

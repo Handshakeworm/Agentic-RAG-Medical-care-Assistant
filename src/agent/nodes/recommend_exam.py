@@ -48,9 +48,7 @@ def recommend_exam(state: MedicalState) -> dict:
     _attempts.labels(node=_NODE, schema=_SCHEMA).inc()
     t0 = time.perf_counter()
     try:
-        chain = get_llm().with_structured_output(
-            RecommendExamOutput, method="json_mode"
-        ).with_retry(stop_after_attempt=3)
+        chain = get_llm().with_structured_output(RecommendExamOutput, method="json_mode").with_retry(stop_after_attempt=3)
         result: RecommendExamOutput = chain.invoke(
             prompt,
             config={

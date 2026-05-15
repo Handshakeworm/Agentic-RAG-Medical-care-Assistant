@@ -25,6 +25,21 @@ from langchain_core.messages import BaseMessage, HumanMessage
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# JSON 输出尾巴 — 仅给 method="json_mode" 的主链 12 处 prompt 拼接
+# ────────────────────────────────────────────────────────────────────────────
+# DeepSeek 主链不支持 function_calling / json_schema,只能用 method="json_mode";
+# 走 json_mode 时 OpenAI 兼容协议要求 prompt 含 "json" 字样(否则 400)。
+# enrichment.py 的 prompt 自带 4-field JSON 输出指引(SHARED_4FIELD_TAIL)是同样
+# 的逻辑;agent prompt 没自带,所以统一拼这条尾巴。
+#
+# vision LLM(qwen via DashScope)走默认 function_calling(避开 thinking + json_mode
+# 冲突,见 scripts/figure_enrichment_generation.py 注释),不需要这条尾巴 ——
+# 所以 build_evidence_assembly_prompt / build_report_parsing_prompt 两个 vision
+# 调用的 prompt **不**拼接此尾巴。
+_JSON_TAIL = "\n\n请严格按 JSON 格式输出,所有字段值与上述 schema 描述一致。"
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # ① info_collect Step 1
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -52,7 +67,7 @@ def build_info_collect_prompt(patient_input: str) -> str:
      associated_symptoms(伴随症状)
    - 患者**未提及**的维度严格保持 None / 空列表,**不要瞎填**
 
-注意:这是初诊采集,信息缺失是正常的,后续会通过追问补全。"""
+注意:这是初诊采集,信息缺失是正常的,后续会通过追问补全。""" + _JSON_TAIL
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -113,49 +128,7 @@ def build_ner_prompt(text: str) -> str:
 - value:量化值,如体温 "38.5°C"、持续时间 "3天";无则 null
 
 不要重复抽取同一实体的不同表述(如同时抽"肚子疼"和"腹痛"),保留患者原始表述即可——
-后续 Step 2 Entity Linking 会做术语标准化。"""
-
-
-def build_entity_linking_prompt(
-    original_text: str, candidates: list[dict]
-) -> str:
-    """② build_query Step 2:从 terms_collection Top-5 候选中选最匹配的标准术语。
-
-    Args:
-        original_text: NER 抽出的实体原始文本(如"肚子疼")
-        candidates: terms_collection.search_aliases 产出的 Top-5 候选,每项含
-                    concept_id / preferred_term / alias / score / icd10 / category
-
-    LLM 输出 EntityLinkingMatch(本实体一项),`matches` 由调用方聚合多个实体后传给
-    `with_structured_output(EntityLinkingResult)`。
-    """
-    cand_lines = []
-    for i, c in enumerate(candidates, start=1):
-        cand_lines.append(
-            f"{i}. concept_id={c.get('concept_id')} | preferred_term={c.get('preferred_term')}"
-            f" | alias={c.get('alias')} | category={c.get('category')}"
-            f" | score={c.get('score'):.4f}"
-        )
-    cand_block = "\n".join(cand_lines) if cand_lines else "(无候选)"
-
-    return f"""你是医学术语链接助手。下面是患者用词与术语库 Top-5 候选,请选择**语义最贴近**的一条
-作为标准术语;若都不贴近,选择"无匹配"。
-
-【患者用词】
-{original_text}
-
-【Top-5 候选】
-{cand_block}
-
-【输出规则】
-- 选定一条 → original_text=患者用词原文,concept_id / preferred_term 取该候选,
-  confidence ∈ [0.5, 1.0] 反映匹配把握
-- 无匹配 → concept_id=null, preferred_term=null, confidence ∈ [0, 0.5)
-
-注意:
-- "肚子疼"与"腹痛"都映射到 R10.4 / "腹痛" — 患者口语 → 标准术语是常见情况
-- 部位修饰(如"右上腹疼")可降级匹配到更宽泛的"腹痛",但 confidence 应略低
-- "胸闷"与"胸痛"是不同症状,不要混淆"""
+后续 Step 2 Entity Linking 会做术语标准化。""" + _JSON_TAIL
 
 
 def build_query_construction_prompt(
@@ -164,17 +137,15 @@ def build_query_construction_prompt(
     report_positive: list[str],
     report_impressions: list[str],
     filled_slots: dict[str, Any],
-    sparse_queries_preview: list[str],
 ) -> str:
-    """② build_query Step 4:LLM 整合证据 → 改写 dense_query;sparse_queries 预填供参考。
+    """② build_query Step 4:LLM 改写 dense_query(单字段输出)。
 
-    Sparse 路实际词袋由 `query_processing.build_sparse_queries` 确定性产出,
-    LLM 只是把它列出来确认 schema 合规;dense_query 是 LLM 真正需要"创作"的字段。
+    Sparse 路词袋由 `query_processing.build_sparse_queries` 确定性产出,
+    完全不进 LLM 视野;LLM 只负责整合证据成一句语义连贯的 dense 查询。
     """
     slots_lines = [f"  - {k}: {v}" for k, v in filled_slots.items() if v]
     slots_block = "\n".join(slots_lines) if slots_lines else "  (无)"
 
-    sparse_preview = "\n".join(f"  - {q}" for q in sparse_queries_preview) or "  (无)"
     pos_block = "; ".join(report_positive) or "(无)"
     imp_block = "; ".join(report_impressions) or "(无)"
     sym_block = "、".join(confirmed_symptoms) or "(无)"
@@ -202,9 +173,7 @@ def build_query_construction_prompt(
 - 长度 ≤ 60 字,信息密度高,把鉴别特征写出来(如"进食后加重的上腹胀痛伴反酸")
 - 不要列举,不要否定词("没有发烧"不进 query)
 - 数值不进 query(白细胞具体数字不写,但"白细胞升高"可写)
-
-【Sparse Queries(已由确定性术语扩展生成,直接照搬,**不要修改**)】
-{sparse_preview}"""
+- 输出仅一个字段:dense_query""" + _JSON_TAIL
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -230,7 +199,7 @@ def build_dimension_selection_prompt(
 - 选能把候选疾病一分为二的维度。例如鉴别胆囊炎 vs 胃溃疡,"trigger"(诱因)和
   "aggravating"(加重因素)信息量高
 - 不要选那些已在 chief_complaint 里隐含的维度
-- 维度名必须是空槽列表中的原文,不要拼写或翻译"""
+- 维度名必须是空槽列表中的原文,不要拼写或翻译""" + _JSON_TAIL
 
 
 def build_askability_prompt(symptom: str) -> str:
@@ -242,7 +211,7 @@ def build_askability_prompt(symptom: str) -> str:
 - 不可问(askable=false):需要医生体格检查或辅助检查才能确认的体征/检验,如
   "Murphy 征阳性"、"肝浊音界缩小"、"白细胞升高"、"心包摩擦音"
 
-reason 字段简短说明判断理由(≤ 30 字)。"""
+reason 字段简短说明判断理由(≤ 30 字)。""" + _JSON_TAIL
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -328,7 +297,7 @@ def build_followup_parse_prompt(
    - 多值槽(aggravating/relieving/associated_symptoms):value=list[str]
 3. new_symptoms:患者回答里**主动提到的、本轮未问到的新症状**;若无则空列表
 
-槽位名必须与本轮待回答项中的 slot 完全一致,不要新造槽名。"""
+槽位名必须与本轮待回答项中的 slot 完全一致,不要新造槽名。""" + _JSON_TAIL
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -391,7 +360,7 @@ def build_recommend_exam_prompt(
 对与已有报告交集的检查,在该项里追加"已有[日期]报告,可携带评估是否需要复做"
 之类的复用说明,不要直接删掉。
 
-口吻面向患者,避免医学术语堆砌,涉及禁食/造影剂等特殊条件要写明。"""
+口吻面向患者,避免医学术语堆砌,涉及禁食/造影剂等特殊条件要写明。""" + _JSON_TAIL
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -518,7 +487,7 @@ def build_diagnosis_ranking_prompt(
 - "insufficient":候选分散、证据不足以支持任何高概率判断
 
 输出 DiagnosisRanking.ranked,**每项的 failure_reason 字段保持 null**(由节点代码兜底填写,
-不在 LLM 职责范围)。"""
+不在 LLM 职责范围)。""" + _JSON_TAIL
 
 
 def build_diagnosis_calibration_prompt(
@@ -549,7 +518,7 @@ def build_diagnosis_calibration_prompt(
 3. 标签校准:differentiation_type 与概率是否匹配?(如 top1=0.35 不应标 confirmed,
    应改 need_exam 或 insufficient)
 
-输出 DiagnosisOutput.results,**每项的 failure_reason 字段保持 null**。"""
+输出 DiagnosisOutput.results,**每项的 failure_reason 字段保持 null**。""" + _JSON_TAIL
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -580,7 +549,7 @@ def build_safety_gate_prompt(
 - dosage_adjustment:基于肝肾功能的剂量调整(从病史推断)
 
 每项含 risk_type / description / severity(high/medium/low) / recommendation。
-若无新风险,additional_risks 留空列表。**不要重复规则层已写的禁忌**。"""
+若无新风险,additional_risks 留空列表。**不要重复规则层已写的禁忌**。""" + _JSON_TAIL
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -615,7 +584,7 @@ def build_advice_prompt(
     更全面评估";step_N_failed → "系统分析出现技术问题,本次结果不可作为依据")
 - urgent_flag:疑似心梗/脑卒中/消化道大出血等高危情况 → True
 
-口吻面向普通患者,不要堆砌术语。"""
+口吻面向普通患者,不要堆砌术语。""" + _JSON_TAIL
 
 
 # ────────────────────────────────────────────────────────────────────────────

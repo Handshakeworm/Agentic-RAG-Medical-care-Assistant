@@ -924,18 +924,21 @@ def wait_exam_report(state: MedicalState) -> dict:
 
 **可问症状信息增益阈值**（`settings.agent_limits.ASKABLE_GAIN_THRESHOLD`，初始值 0.15，见 §9.7）：Node ⑤ 贪心选择循环结束后，若 `followup_questions`（可问症状）中最高增益 < 该阈值，说明剩余可问症状对候选池的区分能力不足，继续追问的边际收益低于直接进入诊断推理。此时清空 `followup_questions`，让 `should_continue` 路由到 `diagnose`，由诊断节点基于已有信息（含 `unaskable_symptoms`）判断是否需要检查鉴别。该阈值仅作用于 Node ⑤ 内部的症状级候选，不与路由层共享，`should_continue` 只读取 `followup_questions` 是否为空作为收敛信号。
 
-##### 4.1.6.2 Entity Linking 流程（build_query Step 2，复用 2.4.6 terms_collection）
+##### 4.1.6.2 Entity Linking 流程（build_query Step 2，复用 2.4.6 terms_collection，**零 LLM**）
 ```
 输入：NER 抽取的实体原始文本（如"肚子疼"）
   ↓
-Step 1: Qwen3-Embedding-8B Dense 编码 → 在 terms_collection 向量检索 Top-5 候选
+Tier 1: query_term_by_alias_exact 标量精确别名匹配 → 命中即返回 concept_id / preferred_term，confidence=1.0
+  ↓ 未命中
+Tier 2: Qwen3-Embedding-8B Dense 编码 → terms_collection Top-1
+        cosine ≥ §9.7 ENTITY_LINKING_TIER2_THRESHOLD（默认 0.92，评测调优微调）
+        → 直接采纳，confidence = cosine 分
+  ↓ 未达阈值
+Tier 3: 保留原文 preferred_term=None / concept_id=None / confidence=0.0
   ↓
-Step 2: LLM 从 Top-5 中选择最匹配项（或判定"无匹配"）
-  - 输出：concept_id, preferred_term, confidence
-  ↓
-Step 3: 结果写入 standardized_entities
+结果写入 standardized_entities
   - 后续 build_query Step 3 以 concept_id 查 terms_collection 获取全部别名，做术语扩展
-  - 后续 extract_symptoms 阶段二复用相同流程，对候选 chunk 中的症状做归一化
+  - 与 ④ extract_symptoms 阶段二走完全相同的三层归一化（同一份实现思路），保证两节点术语一致性
 ```
 
 **三层术语源优先级**：PROJECT（口语/俗称）> ICD-10-CN（国家标准编码）> CMeSH（医学主题词），优先匹配 PROJECT 层确保患者口语能被识别，concept_id 优先采用 ICD-10-CN 编码保证与临床标准对齐。
@@ -1201,7 +1204,7 @@ result = graph.invoke(initial_state, config=config)
 
 > **迁移说明**：原 4.2.8 结构化输出统一策略（含统一机制、Schema 演进兼容性、全量调用清单、全量 Pydantic Schema 定义）已整体迁移至 **[第 9 章 全局实现契约](#9-全局实现契约跨章节)**。
 >
-> 原因：结构化输出是**跨章节的工程契约**（横跨第 3 章摄取、第 4 章 Agent、第 6 章评估），放在"4.2 Agent 上下文管理"下容易被误认为仅适用于 Agent 章节。auto-coder SKILL 按章节拆分规范时，仅读第 4 章的实现者会错失本标准，因此上升为顶级章节。
+> 原因：结构化输出是**跨章节的工程契约**（横跨第 3 章摄取、第 4 章 Agent、第 6 章评估），放在"4.2 Agent 上下文管理"下容易被误认为仅适用于 Agent 章节。按章节拆分加载 spec 时，仅读第 4 章的实现者会错失本标准，因此上升为顶级章节。
 >
 > **任何涉及 LLM 调用的任务（第 3 章 enrichment / 第 4 章所有 Agent 节点 / 第 6 章 LLM Judge / 第 7 章 Prompt 模板），在实现前必须读第 9 章**。
 

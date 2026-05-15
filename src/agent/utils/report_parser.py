@@ -7,7 +7,7 @@
   file_refs[]
     → 用 report_loader.load_report 按需加载(图片转 base64,PDF 直传)
     → 组装多模态 LangChain HumanMessage(text prompt + image_url 内容块)
-    → llm.with_structured_output(ReportFindings) 调用(中安全等级,§9.1 模板)
+    → llm.with_structured_output(ReportFindings, method="json_mode") 调用(中安全等级,§9.1 模板)
     → ReportFindings.findings(每份报告一项)
     → 节点代码补 report_index(对应 exam_reports 下标),写回 State
 
@@ -88,7 +88,7 @@ def parse_reports(file_refs: list[str]) -> list[dict]:
                 base_url=settings.llm.VISION_BASE_URL,
                 api_key=settings.llm.VISION_API_KEY,
             )
-            .with_structured_output(ReportFindings, method="json_mode")
+            .with_structured_output(ReportFindings)
             .with_retry(stop_after_attempt=3)
         )
         result: ReportFindings = chain.invoke(
