@@ -289,19 +289,30 @@ def build_query(state: MedicalState) -> dict:
                             confirmed_symptoms.append(r["preferred_term"])
 
     # ─── Step 3: 术语扩展(确定性,无 LLM)───
-    # 用 standardized_entities 中所有有 concept_id 的 symptom 实体,逐个产出独立 BM25 词袋
+    # 来源 1:EL 链上的 symptom 实体(每个 concept_id 反查全部别名,拼词袋)
     grouped: list[list[str]] = []
     for r in standardized_entities:
         if r.get("entity_type") == "symptom" and r.get("concept_id"):
             grouped.append([r["concept_id"]])
-    sparse_queries = build_sparse_queries(grouped)
+    sparse_queries: list[str] = list(build_sparse_queries(grouped))
 
-    # ─── Step 4: Query 构建(LLM)───
-    report_pos = []
-    report_imp = []
+    # 来源 2:report_findings 里 positive_findings / impressions 每条作为独立 BM25 词袋
+    # (DEV_SPEC §3.2.1 Step 2 扩展:报告语义信号直接进 sparse,不再只走 dense LLM 单点)
+    # report_pos / report_imp 同时供 Step 4 LLM dense_query 改写使用,Step 3 提前收集复用
+    report_pos: list[str] = []
+    report_imp: list[str] = []
     for f in state.report_findings:
         report_pos.extend(f.get("positive_findings") or [])
         report_imp.extend(f.get("impressions") or [])
+
+    seen_bags = set(sparse_queries)
+    for txt in report_pos + report_imp:
+        bag = (txt or "").strip()
+        if len(bag) >= 2 and bag not in seen_bags:
+            sparse_queries.append(bag)
+            seen_bags.add(bag)
+
+    # ─── Step 4: Query 构建(LLM)───
 
     filled_slots = {
         k: v for k, v in state.present_illness_slots.model_dump().items() if v
