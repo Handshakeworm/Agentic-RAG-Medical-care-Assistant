@@ -13,9 +13,16 @@
                            按 preferred_term 去重追加到 standardized_entities;
                            首轮把 chief/present 中已链接症状按 negation 分流写入
                            confirmed_symptoms / denied_symptoms
-  Step 3 术语扩展        — 由确定性工具 query_processing.build_sparse_queries 完成
-                           (每个 concept 取全部别名 → 空格分词袋,过短别名已过滤)
-  Step 4 Query 构建      — LLM 整合 confirmed/slots/report_findings → dense_query;
+  Step 3 Sparse 多字段直采 — 不再调用 EL alias 反查(RETRIEVAL_EVAL §2 评测:中文症状词
+                           EL 50% Tier 3 占位,alias 反查收益低)。改为 state 多字段
+                           直采:chief_complaint + slots 单值字段(trigger / location /
+                           nature / severity / duration_pattern / onset_mode)+ slots
+                           list 字段(associated_symptoms / aggravating / relieving)
+                           + report_findings 的 positive_findings(全加)+ impressions
+                           (阴性过滤:含 "(-)" / "正常" / "阴性" / "未见" / "无异常"
+                           的整条跳过,避免 BM25 不懂否定造成反向召回)。EL Step 2
+                           产物 confirmed_symptoms 等仍由 ⑤ select_symptom 消费。
+  Step 4 Dense Query 构建 — LLM 整合 confirmed/slots/report_findings → dense_query;
                            sparse_queries 直接照搬 Step 3 产出
 
 LLM 调用两处(Step 1 NER、Step 4 Query),按 §9.1 中安全级模板独立写
@@ -25,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 
 from config.settings import settings
@@ -43,7 +51,17 @@ from src.prompts.agent import (
     build_ner_prompt,
     build_query_construction_prompt,
 )
-from src.rag.retrieval.query_processing import build_sparse_queries
+
+
+# Step 3 阴性 impressions 过滤:含此类字样的 impressions 整条视为阴性,跳过(BM25 不懂否定)
+_NEGATIVE_IMPRESSION_RE = re.compile(r"\(-\)|正常|阴性|未见|无异常")
+
+# Step 3 slots 单值字段(每条 strip 后长度 ≥ 2 入 sparse)
+_SLOT_SCALAR_FIELDS = (
+    "trigger", "location", "nature", "severity", "duration_pattern", "onset_mode",
+)
+# Step 3 slots list 字段(每条独立成袋)
+_SLOT_LIST_FIELDS = ("associated_symptoms", "aggravating", "relieving")
 
 
 _logger = logging.getLogger(__name__)
@@ -288,29 +306,46 @@ def build_query(state: MedicalState) -> dict:
                         if r["preferred_term"] not in confirmed_symptoms:
                             confirmed_symptoms.append(r["preferred_term"])
 
-    # ─── Step 3: 术语扩展(确定性,无 LLM)───
-    # 来源 1:EL 链上的 symptom 实体(每个 concept_id 反查全部别名,拼词袋)
-    grouped: list[list[str]] = []
-    for r in standardized_entities:
-        if r.get("entity_type") == "symptom" and r.get("concept_id"):
-            grouped.append([r["concept_id"]])
-    sparse_queries: list[str] = list(build_sparse_queries(grouped))
+    # ─── Step 3: Sparse 多字段直采(确定性,无 LLM,RETRIEVAL_EVAL §2)───
+    # 来源 A:state 多字段(chief_complaint + slots 单值 + slots list)
+    # 来源 B:report_findings 的 positive_findings(全加)+ impressions(阴性过滤)
+    sparse_queries: list[str] = []
 
-    # 来源 2:report_findings 里 positive_findings / impressions 每条作为独立 BM25 词袋
-    # (DEV_SPEC §3.2.1 Step 2 扩展:报告语义信号直接进 sparse,不再只走 dense LLM 单点)
-    # report_pos / report_imp 同时供 Step 4 LLM dense_query 改写使用,Step 3 提前收集复用
+    def _add(item: str | None) -> None:
+        if item is None:
+            return
+        s = item.strip()
+        if len(s) >= 2:
+            sparse_queries.append(s)
+
+    slots_dict = state.present_illness_slots.model_dump()
+
+    # 来源 A.1 — 主诉
+    _add(state.chief_complaint)
+    # 来源 A.2 — slots 单值字段
+    for field in _SLOT_SCALAR_FIELDS:
+        _add(slots_dict.get(field))
+    # 来源 A.3 — slots list 字段(每条独立成袋)
+    for field in _SLOT_LIST_FIELDS:
+        for item in slots_dict.get(field) or []:
+            _add(item)
+
+    # 来源 B — report_findings;report_pos / report_imp 同时供 Step 4 LLM dense_query 改写
     report_pos: list[str] = []
     report_imp: list[str] = []
     for f in state.report_findings:
         report_pos.extend(f.get("positive_findings") or [])
         report_imp.extend(f.get("impressions") or [])
 
-    seen_bags = set(sparse_queries)
-    for txt in report_pos + report_imp:
-        bag = (txt or "").strip()
-        if len(bag) >= 2 and bag not in seen_bags:
-            sparse_queries.append(bag)
-            seen_bags.add(bag)
+    for item in report_pos:
+        _add(item)
+    for item in report_imp:
+        if item and _NEGATIVE_IMPRESSION_RE.search(item):
+            continue  # 跳过阴性印象(BM25 不懂否定,反向贡献)
+        _add(item)
+
+    # 保序去重
+    sparse_queries = list(dict.fromkeys(sparse_queries))
 
     # ─── Step 4: Query 构建(LLM)───
 

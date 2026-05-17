@@ -17,10 +17,16 @@ Agent ③ retrieve 节点融合层:
           ],
         }
 
-公式(标准多路 RRF + 多向量 sum-aggregate,spec §3.2.2 + §9.7):
-    record_score(r) = Σ_route 1 / (k + rank_route(r)),    k=60(传统 RRF 默认)
+公式(加权多路 RRF + 多向量 sum-aggregate,spec §3.2.2 + §9.7):
+    dense_weight    = max(1, N_sparse_actual / RRF_DENSE_WEIGHT_FACTOR)  # 默认 factor=5
+    record_score(r) = dense_weight · 1/(k + rank_dense(r))
+                    + Σ_sparse_route 1/(k + rank_sparse(r)),    k=60
     chunk_score(c)  = Σ_record_in_chunk record_score(record)
     截断按 chunk_score 降序取 Top-N(settings.agent_limits.RETRIEVE_TOP_N,默认 200)
+
+RETRIEVAL_EVAL §4 评测发现:sparse 多字段直采后 N_sparse 涨到 12~30(均 21.8),
+等权 RRF 下 dense 单路被 sparse 路集体挤兑(Top-20 内 dense exclusive chunks
+均 0.45 个/case),加权 N/5 后保留量 ×6.5 至 ~3 个/case。
 
 matched_text 取值规则(spec §3.2.2 行 1822-1825):
     - vector_type='original' → 直接用 hit['original_content'](Milvus 冗余字段)
@@ -103,24 +109,29 @@ def fuse_routes(
     if top_n is None:
         top_n = settings.agent_limits.RETRIEVE_TOP_N
 
-    # ─── Step 1: 跨路计算 record-level RRF 分数 ───
+    # ─── Step 1: 加权多路 RRF — dense 加权,sparse 每路等权(spec §3.2.2)───
     # 同一 record_id 在多路出现 → 分数累加;rank 取首路命中(确定性,可重现)
     record_score: dict[str, float] = {}
     record_hit: dict[str, dict] = {}
     record_first_rank: dict[str, int] = {}
 
-    all_routes: list[list[dict]] = []
-    if dense_route:
-        all_routes.append(dense_route)
-    all_routes.extend(r for r in sparse_routes if r)
+    n_sparse_actual = sum(1 for r in sparse_routes if r)
+    factor = settings.agent_limits.RRF_DENSE_WEIGHT_FACTOR
+    dense_weight = max(1.0, n_sparse_actual / factor) if factor > 0 else 1.0
 
-    for route in all_routes:
+    def _accumulate(route: list[dict], weight: float) -> None:
         for rank, hit in enumerate(route, start=1):
             rid = hit["id"]
-            record_score[rid] = record_score.get(rid, 0.0) + 1.0 / (rrf_k + rank)
+            record_score[rid] = record_score.get(rid, 0.0) + weight / (rrf_k + rank)
             if rid not in record_hit:
                 record_hit[rid] = hit
                 record_first_rank[rid] = rank
+
+    if dense_route:
+        _accumulate(dense_route, dense_weight)
+    for route in sparse_routes:
+        if route:
+            _accumulate(route, 1.0)
 
     if not record_score:
         return []

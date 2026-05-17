@@ -28,7 +28,7 @@
 
 1. ✓ **step1 sparse 多字段直采**(放弃 EL alias 反查),数据驱动
 2. ✓ **RRF 动态加权 dense_weight = max(1, N_sparse/5)**,补救 sparse 多路挤兑 dense
-3. ✗ **Reranker 默认关闭** — 全 62 case 数据证明 BGE Reranker 全面输 RRF 加权(NDCG@20 -0.076,赢 19% case)
+3. ✗ **Reranker 默认关闭** — 全 62 case 数据,K=20(生产口径)下 BGE Reranker 在所有主指标上均无优势(Hit -1.6pp / NDCG -0.076 / MRR -0.065,无指标维度赢),**性价比决策关掉,非"灾难性退化"**(详见 §7)
 
 ---
 
@@ -272,39 +272,52 @@ Spec §3.2.2 / §4.1.2 写 "等权融合,无需手动权重"。当前改造**突
 
 ---
 
-## 7. Reranker 评测 — 推荐关闭
+## 7. Reranker 评测 — 推荐关闭(性价比决策,非退化大)
 
 ### 评测设计
 
-- **范围内重排** — Reranker 输入 = 已评 50 parents 对应的所有 chunks(case 001 ~103 个,跨 62 case mean ~95)
-- **fusion-agnostic ground truth** — LLM Judge 给的 parent score,Reranker 和 RRF 加权都是 prediction
-- **比哪个更接近 LLM 判断**(NDCG / Spearman ρ vs LLM)
+- **范围内重排** — Reranker 输入 = RRF 加权 Top-50 chunks(case 001 ~103 个,跨 62 case mean ~95),`top_k=None` 全量重排后再按 K 切顶
+- **生产对齐** — ⑩ diagnose 实际输入 = Top-20 parents,所以 **K=20 是唯一主决策口径**;K=5/10/50 退到附表辅助
+- **fusion-agnostic ground truth** — LLM Judge 给的 parent score,RRF 加权 和 Reranker 都是 prediction,比哪个更接近 LLM 判断
 
-### 全量 62 case 对照(★K=20)
+### 主结果(★K=20,生产口径)
 
-| 指标 | RRF 加权 | Reranker | Diff | Reranker 赢 |
+| 主指标 | RRF 加权 | Reranker | Diff | Reranker 赢 case 数 |
 |---|---|---|---|---|
-| **NDCG@20** | **0.774** | 0.698 | **-0.076** | 12/62 (19%) |
-| P@20(≥2) | 67.6% | 64.4% | -3.2% | 13/62 (20%) |
-| P@20(≥3) | 37.8% | 34.4% | -3.4% | 12/62 (19%) |
+| **Hit@20(≥3)** | **100%** | 98.4% | **-1.6pp**(漏 1 case)| 0/62 |
+| **NDCG@20** | **0.774** | 0.698 | **-0.076**(相对 -10%)| 12/62 (19%) |
 | **MRR(≥2)** | **0.954** | 0.889 | **-0.065** | **2/62 (3%)** |
-| Avg score | 1.944 | 1.867 | -0.077 | 15/62 (24%) |
+| Avg score @20 | 1.944 | 1.867 | -0.077 | 15/62 (24%) |
+| ~~P@20(≥2)~~(非主指标) | 67.6% | 64.4% | -3.2pp | 13/62 (20%) |
+| ~~P@20(≥3)~~(非主指标) | 37.8% | 34.4% | -3.4pp | 12/62 (19%) |
 
-**Spearman ρ:** RRF +0.708 / Reranker +0.687,diff -0.021,Reranker 赢 29/62 (46%)
+**Spearman ρ:** RRF +0.708 / Reranker +0.687,diff -0.021,Reranker 赢 29/62 (47%) **接近平局**
 
-### 关键发现
+### 关键发现(K=20)
 
-1. **Reranker 在 80% case 上拖后腿**(19~24% win rate 是噪音水平,不是真改进)
-2. **MRR(≥2) 只赢 3%** — Reranker **顶部排序最差**,常把高分 parents 排掉
-3. **K=50 时 P/Avg 完全相同** — 范围内重排只 reorder 不换 set;只有 NDCG/MRR 受 ordering 影响
+1. **没有任何一项主指标 Reranker 赢** — 不是 "全面退化",但 **生产意义上找不到开它的理由**
+2. **Hit@20(≥3) -1.6pp = 1 个 case 高相关全被挤到 20 名外**(范围内重排只能持平或丢,不可能涨)
+3. **MRR(≥2) 只赢 3%** — Reranker **顶部排序系统性变差**,常把 RRF 排在 Top-1/2 的高分 parent 挪到 Top-3 后
+4. **Spearman ρ 接近平局** — ordering 上整体差异在噪音水平,主要损失集中在"顶部"
+
+### 附表 — K=5/10/50 完整数据(非生产口径,供参考)
+
+| K | NDCG diff | P(≥3) diff | MRR(≥2) diff | Hit(≥3) diff | NDCG win |
+|---|---|---|---|---|---|
+| K=5 | -0.146 | -16.1pp | -0.069 | -8.1pp | 15/62 |
+| K=10 | -0.112 | -9.4pp | -0.067 | -3.2pp | 13/62 |
+| **K=20★** | **-0.076** | -3.4pp | **-0.065** | **-1.6pp** | 12/62 |
+| K=50 | -0.047 | 0pp | -0.065 | 0pp | 13/62 |
+
+K=5/10 差距更大是 Reranker 把高分 parent 挤后的副产品,K=50 持平是因为范围内重排不换 set(只换 ordering)。**生产决策不该用 K=5/10 数据**。
 
 ### 可能原因
 
 | 假设 | 备注 |
 |---|---|
 | `patient_text` 长 query 不适配 BGE Reranker | 200+ 字病例原文 ≠ "问句-段落" 训练分布 |
-| RRF 加权已 ρ=0.71,接近 LLM 判断,reranker 无空间挖 | 加权方案太好了 |
-| BGE Cross-Encoder 跟 LLM 判断 misalign | Cross-Encoder ≠ 通用推理 |
+| RRF 加权已 ρ=0.71,接近 LLM 判断,reranker 无空间挖 | 加权方案太好了,留给 reranker 的提升空间已被吃完 |
+| BGE Cross-Encoder 跟 LLM 判断 misalign | Cross-Encoder ≠ 通用推理 LLM 视角 |
 
 ### 生产决策
 
@@ -315,10 +328,14 @@ Spec §3.2.2 / §4.1.2 写 "等权融合,无需手动权重"。当前改造**突
 RERANKER_ENABLED=False
 ```
 
-**收益:**
-- 省 2.6 GB GPU 显存(BGE-Reranker-v2-minicpm-layerwise INT8)
-- 省 ~5 秒/次 reranker 推理延迟
-- **NDCG@20 反而提升 +0.076**
+**性价比账(K=20 口径):**
+- **成本**:2.6 GB GPU 显存(BGE-Reranker-v2-minicpm-layerwise INT8) + ~5 秒/次 推理延迟
+- **收益**:NDCG@20 +0.076 / Hit@20 +1.6pp / MRR +0.065
+- **结论**:Reranker 在 K=20 是**边际退化** + 显著成本,**关掉是性价比决策**,不是 "Reranker 灾难性"
+
+### 待验证(最终判定要看下游)
+
+当前只评检索质量,**Reranker 真正命运取决于 ⑩ diagnose 节点能否在 RRF 加权 Top-20 上稳定输出正确诊断** — 见 §9 "下游 ⑩ diagnose 准确率验证"。如果下游表现已经达标,关 Reranker 没争议;如果下游受 ordering 影响大,Reranker 可能仍有空间。
 
 代码:[`.eval/rag_eval/compare_rerank_full.py`](.eval/rag_eval/compare_rerank_full.py)
 数据:[`.eval/rag_eval/sparse_fusion_compare/rerank_full_result.json`](.eval/rag_eval/sparse_fusion_compare/rerank_full_result.json)(334 KB)
@@ -377,15 +394,18 @@ RERANKER_ENABLED=False
 
 ---
 
-## 10. 与 DEV_SPEC 的关系
+## 10. 与 DEV_SPEC 的关系(2026-05-17 已全部同步)
 
-| Spec 章节 | 本评测的影响 |
+| Spec 章节 | 同步状态 |
 |---|---|
-| §3.2.1 Step 2 sparse_queries 来源 | **需要更新** — 当前 EL alias 反查改为 step0 多字段直采 |
-| §3.2.2 RRF 等权融合 + 自调节权重 | **需要更新** — N_sparse 大幅超假设时需动态加权(`dense_weight = N_sparse/5`)|
-| §3.2.3 Reranker 可关闭 + None 模式 | **数据支持** — 默认 None,设计原本就这样 |
-| §4.1.2 ②.Step3 sparse 设计 | **需要更新** — 多字段直采(同 §3.2.1)|
-| §9.3 LLM call 清单 | 无新增(本评测不引入新 LLM 调用)|
-| §9.7 `agent_limits` | 可考虑加 `RRF_DENSE_WEIGHT_FACTOR=5`(对应 `N/5` 公式),`RERANKER_ENABLED=False`|
+| §3.2.1 Step 2 sparse_queries 来源 | ✅ 已改 — sparse 多字段直采(state 字段 + 阴性过滤) |
+| §3.2.2 RRF 加权融合 | ✅ 已改 — 加权 RRF `dense_weight = max(1, N_sparse/RRF_DENSE_WEIGHT_FACTOR)` |
+| §3.2.3 Reranker 默认 None | ✅ 已改 — 明确"None(关闭,默认)" + 评测依据 |
+| §4.1.2 ②.Step 3/4 + ③ retrieve | ✅ 已改 — Sparse 多字段直采 + 加权 RRF 描述 |
+| §4.1.2 ⑩ Step 0 | ✅ 已改 — `RERANK_TOP_K=20` + ENABLED=False 走 fallback |
+| §9.7 `agent_limits` | ✅ 已加 `RRF_DENSE_WEIGHT_FACTOR=5`;`RERANK_TOP_K` / `RERANKER_ENABLED` 在 RetrievalSettings/RerankerSettings 段(不在 agent_limits) |
+| §9.3 LLM call 清单 | 无变化(本评测不引入新 LLM 调用) |
 
-Spec 更新时机:用户确认评测结论可以落地后,统一开 PR 改 spec + 业务代码 + 跑回归测试。
+**Code 同步**:`config/settings.py` / `src/rag/retrieval/fusion.py` / `src/agent/nodes/build_query.py` 三文件已改;357 unit test PASS。
+
+**EL 链路保留**:Step 1 NER + Step 2 Entity Linking 节点不动(产物 `confirmed_symptoms` / `standardized_entities` 仍供 ⑤ select_symptom 消费),只是 sparse 不再用 EL alias 反查。EL 整体去留待后续单独评估(EL_DESIGN_REVIEW §11)。

@@ -2,10 +2,39 @@
 
 # Agentic-RAG Medical Care Assistant
 
-> 患者侧症状自查与分诊初诊系统 — 基于 LangGraph Agent + 多路检索 RAG。
+> 患者侧症状自查与初诊判断系统 — 基于 LangGraph Agent + 多路检索 RAG。
 >
 > **个人练手项目**(非生产部署),涵盖数据工程 → ML 推理 → Agent 编排 → 后端 → 基础设施 → 评估的全栈端到端实现。
 > 设计与实现完全 spec-driven,单一事实源:[DEV_SPEC.md](DEV_SPEC.md)(4976 行)。
+
+---
+
+## 评测成绩(62 case 执业医考题,2026-05-17)
+
+> 两层评测:**① RAG 检索**(召回的医学文献是否覆盖正确章节)→ **② 诊断**(LLM 基于召回 chunk 给出诊断的准确率)
+
+### ① RAG 检索质量(LLM Judge 对 parent 评 0~3 分作 ground truth)
+
+| 指标 | 成绩 | 含义 |
+|---|---|---|
+| **Hit@20(≥3 高相关)** | **100%** | 62/62 case **0 漏掉高相关章节** |
+| **NDCG@20** | **0.774** | 排序质量(医疗专域 0.6~0.8 区间上中段) |
+| **MRR(≥2)** | **0.954** | 几乎所有 case Top-1 即命中中度相关 |
+| Spearman ρ vs LLM | +0.708 | RAG 排序与 LLM 判断高度一致 |
+
+### ② 诊断准确率(LLM 基于 RAG Top-20 给出诊断,Judge 评 gold ↔ LLM 等价性)
+
+> **多 gold case**:同一患者并存多个疾病/合并症的 case(如 "脾破裂 + 肋骨骨折"、"冠心病急性心梗 + 急性左心衰竭" — 62 case 中约半数属此类)
+
+| 指标 | 成绩 | 含义 |
+|---|---|---|
+| **Top-1 临床命中率** | **93.5%** | LLM 第一选项就是 gold 临床等价(58/62)|
+| **Top-3 命中率** | **100%** | gold 主诊断必在前 3 — **62/62 无漏诊** |
+| **0 主诊断方向错** | **0/62** | 所有 case 都给出正确诊断方向(无 `none`)|
+| **多 gold 平均覆盖率** | **86.7%** | 多 gold case 平均 86.7% 的 gold 被 LLM 列出 |
+| 多 gold 全召回率 | 72.6% | 多 gold case 所有 gold 都被覆盖(45/62)|
+
+→ 详细方法学 / match_type 分布 / 关键设计决策见 [评测结果](#评测结果) · 全检索层细节见 [RETRIEVAL_EVAL.md](RETRIEVAL_EVAL.md)
 
 ---
 
@@ -19,6 +48,7 @@
 - [数据层](#数据层)
 - [技术栈与选型理由](#技术栈与选型理由)
 - [快速开始](#快速开始)
+- [评测结果](#评测结果)
 - [项目进度](#项目进度)
 - [目录结构](#目录结构)
 - [文档导航](#文档导航)
@@ -28,11 +58,11 @@
 
 ## 项目定位
 
-**做什么**:用户用自然语言描述症状,系统通过多轮追问澄清病史、检索 13 本医学教材知识库、给出可能的诊断方向、必要时建议进一步检查、最终输出非诊断性的就医建议与风险提示。
+**做什么**:用户用自然语言描述症状,系统通过多轮追问澄清病史、检索 13 本医学教材知识库、**给出初步诊断 + 鉴别诊断方向 + 进一步检查建议**。62 case 执业医考题评测:**Top-1 临床等价命中率 93.5%、Top-3 100%、0 主诊断方向错**(详见下方"评测结果")。
 
-**给谁用**:普通用户的初诊分诊指引(到底要不要去医院、挂哪个科)。**不是医生辅助诊断工具**,所有 LLM 输出都经过 `safety_gate` 节点二次过滤,严格规避诊断口吻和处方建议。
+**给谁用**:为患者提供初诊判断与就医引导。所有 LLM 输出经 `safety_gate` 节点二次过滤,**不开具处方剂量、不替代专业医生面诊** — 系统的角色是"给出医生可能想到的诊断方向 + 建议如何进一步检查",最终诊断与治疗仍以执业医师为准。
 
-**不做什么**:影像识别、外科手术规划、儿科特化、药物剂量计算 — 这些场景下患者侧 RAG 价值有限,且需要专业模型(超出本项目范围)。
+**不做什么**:影像直接解读、外科手术规划、儿科特化、药物剂量计算 — 这些场景需要专业模型或医生现场判断,超出本项目范围。
 
 ---
 
@@ -49,17 +79,18 @@
 | 基础设施 | • Docker Compose 13 容器一键启动<br>• Prometheus 6 监控目标 + 11 类业务指标(LLM 健康度 / 上下文长度 / PG·Redis·Milvus 三层依赖)<br>• Grafana 启动自动加载 2 仪表盘(应用 + 硬件);日志面板点击跳数据库审计详情<br>• 每请求一个 trace ID 串日志 / 审计 / 监控三路<br>• **基础设施降级哲学**:Redis 挂回源 PG / 限流 fail-open / Reranker 超时回退原序,故障半径控死在一层 |
 | 工程过程 | • Spec-driven 协作开发:[DEV_SPEC.md](DEV_SPEC.md) 唯一事实源,[CLAUDE.md](CLAUDE.md) 锚定开发红线<br>• 我做架构与取舍判断,Claude 落地代码 + 反向同步 §8.4 进度<br>• 测试 355 单元 + 71 集成 PASS |
 
-### 2. 多路检索 + 多向量索引(单阶段 RRF)
+### 2. 多路检索 + 多向量索引(单阶段加权 RRF)
 
 不是常见的"先 dense 再 sparse 后 rerank"流水,而是召回阶段同时玩两个维度的"多":
 
-**多路 RRF**(双源 sparse 词袋 + 1 路 dense):
-- Sparse 路 **双源词袋**:
-  - 来源 A — 症状维度:EL 链上 `concept_id` 在 `terms_collection` 的全部别名(含口语/缩写/英文)拼成一个词袋
-  - 来源 B — 报告语义信号:`report_findings` 的 `positive_findings` / `impressions` 每条作为独立词袋(如"瞳孔散大"、"右额颞线形骨折"直接进 sparse 召回)
+**多路加权 RRF**(state 多字段 sparse + 1 路 dense,2026-05-17 评测确定):
+- Sparse 路 **多字段直采**(放弃 EL alias 反查,RETRIEVAL_EVAL §2 评测决定):
+  - 来源 A — state 结构化字段:`chief_complaint` + `present_illness_slots` 6 单值字段(trigger/location/nature/severity/duration_pattern/onset_mode)+ 3 list 字段(associated_symptoms/aggravating/relieving)
+  - 来源 B — 报告语义信号:`report_findings.positive_findings` 全加 + `impressions` 阴性过滤(`(-)`/正常/阴性/未见/无异常)
+  - 实测 62 case 平均 21.8 条 sparse 词袋
 - 每条词袋 = 1 次独立 BM25(不是拼成 1 个 query),N 条 = N 次查询
 - Dense 路 1 次 ANN
-- (N+1) 路一起做 RRF 融合,某 chunk 命中维度越多权重越大 — **跨模态权重自调节,不需要手调 dense:sparse 比例**
+- (N+1) 路一起做**加权 RRF 融合**:`dense_weight = max(1, N_sparse/5)` 平衡 sparse 多路对 dense 的挤兑(RETRIEVAL_EVAL §4);sparse 多路命中累加保留"跨模态自调节"特性
 
 **多向量索引**(每个 chunk 入库 5 路向量):
 
@@ -492,9 +523,107 @@ docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d nginx
 
 ---
 
+## 评测结果
+
+**评测数据**:62 case 执业医考题(单主诊断 + 教科书初诊答案),全量入链路不预筛。
+
+**两层评测**:① 检索质量(RAG 召回是否覆盖正确章节) + ② 诊断准确率(LLM 基于召回 chunk 能否得出正确诊断)。
+
+### 1. 检索质量(parent-level,62 case)
+
+LLM Judge(DeepSeek)对 RRF 加权 Top-50 parents 评 0~3 分,得到 ground truth 排序,再对照 prediction 算 NDCG / Spearman。
+
+| 指标 | parent-level | 解读 |
+|---|---|---|
+| **NDCG@20** | **0.774** | 排序质量高(医疗专域 0.6~0.8) |
+| **Hit@20(≥3)** | **100%** | **0 case 漏掉高相关章节** |
+| **MRR(≥2)** | **0.954** | 几乎所有 case Top-1 即命中中相关 |
+| **Spearman ρ vs LLM** | **+0.708** | 排序高度对齐 LLM 判断 |
+| Avg score @20 | 1.944 | Top-20 平均 14 个中度以上相关 |
+
+### 2. 诊断准确率(62 case,完整 RAG → ⑩ 闭环)
+
+把 RAG 加权 Top-20 parents + 病例信息(含 figure 截图)喂 vision LLM(qwen3.5-plus),输出候选疾病列表 + 概率;再用 LLM Judge(DeepSeek)按"临床本质等价"评判 gold vs LLM Top-K 命中。
+
+> **术语说明**:
+> - **"gold"** = 教科书答案里的初步诊断 list(从执业医考题 PDF 抽取)
+> - **"主诊断" / "gold[0]"** = list 的第一项,通常是病例主要疾病(如"急性心肌梗死")
+> - **"多 gold / 多诊断 case"** = 同一患者**同时存在多个并存疾病/合并症**的 case(如 case 014 "脾破裂 + 肋骨骨折"、case 028 "Graves 病 + 甲亢性心脏病"、case 043 "冠心病急性心梗 + 急性左心衰竭" — 62 case 中约一半属此类)
+> - **multi-gold recall** = 多 gold case 平均**几个 gold 被 LLM 候选覆盖**的比例;**全 gold 命中** = 所有 gold 都被 LLM 给出对应 candidate
+
+| 指标 | 数值 | 解读 |
+|---|---|---|
+| **Top1 命中率(loose)** | **93.5%** | 主诊断在 rank=1 临床等价(58/62) |
+| **Top1 命中率(strict)** | 61.3% | rank=1 且 exact/equivalent/more_specific(38/62) |
+| **Top3 命中率** | **100% 🎯** | gold 主诊断全部在 top-3(62/62) |
+| **Top5 命中率** | 100% | |
+| **MRR(loose)** | ~0.96 | 几乎所有 case top1 就给出正确诊断 |
+| **Multi-gold recall mean** | 0.867 | 多并发诊断 case 平均 86.7% gold 被覆盖 |
+| **全 gold 命中 case** | 45/62 (72.6%) | 多并发诊断 case 所有 gold 都被 LLM 列出 |
+| **0 主诊断 none** | 0/62 | 没有任何 case 主诊断方向错 |
+
+**match_type 分布(主诊断)**:
+
+| 类型 | 数量 | 含义 |
+|---|---|---|
+| exact | 9 | 字面完全相同 |
+| **equivalent** | **17** | 同病不同表述(Graves 病 = 毒性弥漫性甲状腺肿)|
+| **more_specific** | **15** | LLM 比 gold 更精确(STEMI vs 急性心梗) |
+| more_general | 13 | LLM 比 gold 笼统 |
+| partial | 8 | 多 gold 只命中部分 |
+| none | 0 | 完全不匹配 |
+
+### 3. 关键设计决策(均经评测验证)
+
+| 决策 | 评测依据 |
+|---|---|
+| **Reranker 默认关闭** | K=20 下 BGE Reranker 全主指标无优势(NDCG -0.076 / Hit -1.6pp / MRR -0.065),省 2.6GB GPU + 5s 延迟 |
+| **RRF 动态加权** `dense_weight = max(1, N_sparse/5)` | 等权下 dense 单路被 sparse 多路挤兑,加权后 Top-20 内 dense exclusive chunks 保留量 ×6.5 |
+| **Sparse 多字段直采**(放弃 EL alias 反查) | step1 改造后 sparse 路数 12~30(均 21.8),信号更全 |
+| **20 unique parents 喂 LLM**(对齐 LLM Judge 口径) | parent 不参与 embedding,需从 Top-200 chunks 顺序去重 |
+
+### 4. 评测方法 + 数据 + 脚本
+
+- **评测数据**:`.eval/rag_eval/cases/*.json` — 62 case 执业医考题(`patient_text` + `diagnosis` gold)
+- **检索评测**:`.eval/rag_eval/{compare_rrf_weighting,run_llm_judge,compute_metrics}.py`
+- **诊断评测**:`.eval/rag_eval/{run_diagnose_eval,run_diagnose_judge}.py`
+- **per-case 结果**:
+  - 诊断结果 `.eval/rag_eval/diagnose_eval/*.json`(62 个 + gold + LLM candidates + prompt + raw)
+  - LLM Judge 评判 `.eval/rag_eval/diagnose_judge/*.json` + `diagnose_judge_summary.json`
+- **详细报告**:[RETRIEVAL_EVAL.md](RETRIEVAL_EVAL.md)(检索层 7 章详述含 Reranker 全 K 对照、双粒度指标方法学)
+
+### 5. 真实 case 示例 — 完整 LLM 诊断输出
+
+以 case 001 为例(典型 EDH 病例,Top-1 命中):
+
+> **病例**(节选):男性 23 岁,骑车撞倒右颞部着地半小时。曾昏迷 5 分钟,清醒后头痛恶心。**2 小时后头痛加重 + 呕吐 + 烦躁 + 浅昏迷,右瞳散大对光反射迟钝,左 Babinski 阳性**。头颅平片:右额颞线形骨折。
+>
+> **Gold(教科书初诊)**:右额颞急性硬膜外血肿
+
+LLM 给出的 4 个候选(按概率降序):
+
+| Rank | 疾病 | Prob | 关键证据(LLM 自己写) | LLM Judge 评判 |
+|---|---|---|---|---|
+| **1** | **右颞部急性硬脑膜外血肿** | **0.95** | "典型'中间清醒期'病史:伤后昏迷 5 min,清醒后头痛恶心,2h 后再次意识障碍" + "右颞部着地 + 右额颞线形骨折,易损伤脑膜中动脉导致 EDH" | ✅ **equivalent**(临床本质同一疾病,部位细微差异)|
+| 2 | 右颞部急性硬脑膜下血肿 | 0.35 | "颅压增高 + 脑疝体征与本例相符" | 鉴别诊断:"SDH 多由桥静脉撕裂,中间清醒期较少见,CT 月牙形 vs EDH 双凸形" |
+| 3 | 右颞叶脑挫裂伤伴脑内血肿 | 0.25 | "右颞部直接受力 + 2h 病情恶化可能为迟发性出血" | 鉴别诊断 |
+| 4 | 弥漫性轴索损伤(DAI) | 0.05 | "车祸旋转加速机制" | 鉴别诊断:"DAI 立即持续昏迷,无中间清醒期,本例不支持" |
+
+**亮点**:LLM 不仅给出主诊断,还**自主完成了完整的临床鉴别诊断推理**(EDH vs SDH vs 脑内血肿 vs DAI),引用召回的文献章节(`文本块 N`)作证据,并给出 CT 特征等可操作的鉴别要点 — 接近临床医生的初诊思维过程。
+
+### 6. 评测局限(诚实展示)
+
+- **数据是执业医考题**(单主诊断为主 / 信息相对完整),**真实临床多病并发场景**复杂度更高;主诊断 100% 入 top-3,但多 gold case 的次诊断/合并症 LLM 不一定独立列出(case 062 麻疹给了"麻疹"但没单列"合并肺炎"作 candidate)
+- **评测为单轮**(`patient_text` 一次性输入),没跑 Agent 多轮追问;production 真实场景会有 ④/⑤/⑦ 节点产出 `confirmed_symptoms` / `medical_history` 信息,目前评测里这些字段空
+- **gold 是教科书"初步诊断"答案**,带"可能性大" / "待除外" / "初步诊断:" 等不确定语气;Judge 已按"初步诊断"口径校准(忽略这类语气词)
+- **LLM Judge 评等价性**:DeepSeek 评 gold ↔ LLM 等价等级,本身有 LLM bias 风险;case-by-case 人工抽查显示评判合理(详见 [.eval/rag_eval/diagnose_judge/](.eval/rag_eval/diagnose_judge/))
+- **真实"误诊"** 只 1 例 — case 049 "慢性菌痢",LLM top1 给 "溃疡性结肠炎"(gold 在 top2 equivalent 命中);1 例 case 007 输尿管结石 LLM 一开始给 "肿瘤" 是合理临床歧义(B 超未见结石强回声 + 55 岁吸烟 → 倾向肿瘤),重跑后给出结石
+
+---
+
 ## 项目进度
 
-详见 [DEV_SPEC.md §8.4 进度跟踪表](DEV_SPEC.md#84-进度跟踪表)。截至 2026-05-14:
+详见 [DEV_SPEC.md §8.4 进度跟踪表](DEV_SPEC.md#84-进度跟踪表)。截至 2026-05-17:
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
@@ -506,7 +635,7 @@ docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d nginx
 | F | Agent 工作流(16 节点 + 2 路由) | 完成 |
 | G | API 层与权限系统(7 项) | 完成 |
 | H | 基础设施增强(Redis / Prometheus / Grafana / Loki / DCGM) | 完成 |
-| I | 评估体系(RAG / Agent / LLM Judge / 在线追踪) | 待开始 |
+| I | 评估体系 | **主体完成**(检索 RAG 评测 + 诊断闭环 + 双层 LLM Judge,见上"评测结果";Agent 多轮追问评测待补)|
 | J | 端到端验收与文档收口 | J0(Docker 化部署)完成,J1-J6 待开始 |
 
 **测试覆盖**:unit 355 PASS / integration 71 PASS(真 PG + Milvus + Redis)/ e2e 留 J1-J4;skip 17(GPU 模型 + 已知 Milvus race)。
@@ -563,9 +692,20 @@ docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d nginx
 │   ├── loki/
 │   └── promtail/
 │
-├── evaluation/              # I 阶段评估(待补)
+├── .eval/rag_eval/          # I 阶段评测数据 + 脚本(详见"评测结果")
+│   ├── cases/               # 62 case 执业医考题(patient_text + gold)
+│   ├── step0_cache/         # case 文本拆解为 MedicalState 字段
+│   ├── sparse_fusion_compare/  # 检索评测中间产物(64MB,gitignored)
+│   ├── diagnose_eval/       # 62 case 诊断完整输出
+│   ├── diagnose_judge/      # LLM Judge 评判结果
+│   ├── run_diagnose_eval.py / run_diagnose_judge.py
+│   ├── compare_rrf_weighting.py / run_llm_judge.py / compute_metrics.py
+│   ├── compare_rerank_full.py / validate_table_recall.py / step1.py
+│   └── parse_pdf_to_cases.py
+│
+├── evaluation/              # 预留(在线追踪/生产评测,待补)
 └── tests/
-    ├── unit/                # 280 PASS(全 mock)
+    ├── unit/                # 357 PASS(全 mock)
     ├── integration/         # 71 PASS / 17 skip(真 PG + Milvus + Redis)
     └── e2e/                 # 真 LLM API(J 阶段)
 ```

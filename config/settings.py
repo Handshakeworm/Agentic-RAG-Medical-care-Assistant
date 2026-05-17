@@ -32,6 +32,7 @@ class AgentLimitsSettings(BaseSettings):
     ENTITY_LINKING_TIER2_THRESHOLD: float = Field(0.92, description="terms_collection 向量检索 Cosine 截断")
     RERANKER_CUTOFF_LAYERS: int | None = Field(None, description="layerwise early-exit 层数,None=全 40 层(模型自身完整深度)")
     RETRIEVE_PARENT_FIGURE_CAP: int = Field(5, description="Context 扩展规则 3:父块在 LLM context 里能带的同节图表数封顶")
+    RRF_DENSE_WEIGHT_FACTOR: int = Field(5, description="RRF 加权融合:dense_weight = max(1, N_sparse/factor)。RETRIEVAL_EVAL §4 评测:sparse 路数 12~30 时等权融合 dense 被挤兑,N/5 加权保留 D:S ≈ 1:3~1:4")
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -90,6 +91,8 @@ class RerankerSettings(BaseSettings):
     MODEL_PATH: str = "/data/reranker-model/BAAI--bge-reranker-v2-minicpm-layerwise"
     DEVICE: str = "cuda"
     TIMEOUT_SECONDS: int = 5
+    # 2026-05-17 RETRIEVAL_EVAL §7:K=20 下 BGE Reranker 在所有主指标无优势(Hit -1.6pp / NDCG -0.076 / MRR -0.065),性价比关掉
+    ENABLED: bool = False
 
 
 class LLMSettings(BaseSettings):
@@ -139,7 +142,7 @@ class RetrievalSettings(BaseSettings):
 
     SPARSE_TOP_K: int = 20
     DENSE_TOP_K: int = 20
-    RERANK_TOP_K: int = 5
+    RERANK_TOP_K: int = 20  # 2026-05-17 RAG 评测确认 K=20 是生产口径(Hit@20=100%,NDCG=0.774);旧值 5 为初版未验证
 
 
 # ────────────────────────────────────────────────────────────────────────────

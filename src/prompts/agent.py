@@ -442,7 +442,7 @@ def build_evidence_assembly_prompt(
 - report_evidence:每项 {{finding, role(quantitative_support/qualitative_support/exclusion)}}
 
 至少给出 1 个候选;若文献片段都不相关,也要给一个候选(disease="待进一步评估"),
-supporting/opposing 留空,后续 Step 2 会判定为 insufficient。"""
+supporting/opposing 留空,后续 Step 2 会判定为 insufficient。""" + _JSON_TAIL
 
     # 多模态消息组装:base text + 每张可加载的 figure 截图作 image_url 块
     content: list[dict] = [{"type": "text", "text": prompt_text}]

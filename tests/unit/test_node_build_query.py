@@ -38,12 +38,11 @@ def _alias_table(mapping: dict[str, dict]) -> callable:
 @patch("src.agent.nodes.build_query.search_aliases", return_value=[])
 @patch("src.agent.nodes.build_query.query_term_by_alias_exact")
 @patch("src.agent.nodes.build_query.get_embedding_model")
-@patch("src.agent.nodes.build_query.build_sparse_queries", return_value=["腹痛 肚子疼"])
 @patch("src.agent.nodes.build_query.get_llm")
 def test_first_round_full_pipeline(
-    mock_llm_factory, mock_sparse_build, mock_embed, mock_alias_exact, _aliases
+    mock_llm_factory, mock_embed, mock_alias_exact, _aliases
 ):
-    """首轮:NER → EL(Tier 1 精确)→ Step3 → Step4;chief 中症状自动入 confirmed_symptoms。"""
+    """首轮:NER → EL(Tier 1 精确)→ Step3 多字段直采 → Step4;chief 中症状自动入 confirmed_symptoms。"""
     from src.agent.nodes.build_query import build_query
 
     mock_embed.return_value.encode_one.return_value = [0.1] * 4096
@@ -69,7 +68,8 @@ def test_first_round_full_pipeline(
     assert "腹痛" in update["confirmed_symptoms"]
     assert "发热" in update["denied_symptoms"]
     assert update["dense_query"] == "持续3天的中等程度腹痛"
-    assert update["sparse_queries"] == ["腹痛 肚子疼"]
+    # Step 3 多字段直采:chief_complaint 进 sparse(无 slots / report 时只有这一条)
+    assert "腹痛 3 天" in update["sparse_queries"]
     assert update["last_nlu_round"] == 0  # followup_round 初始为 0
     assert len(update["standardized_entities"]) == 2
 
@@ -77,10 +77,9 @@ def test_first_round_full_pipeline(
 @patch("src.agent.nodes.build_query.search_aliases", return_value=[])
 @patch("src.agent.nodes.build_query.query_term_by_alias_exact", return_value=None)
 @patch("src.agent.nodes.build_query.get_embedding_model")
-@patch("src.agent.nodes.build_query.build_sparse_queries", return_value=[])
 @patch("src.agent.nodes.build_query.get_llm")
 def test_check_path_skips_ner_and_linking(
-    mock_llm_factory, _sparse, _embed, _alias_exact, _aliases
+    mock_llm_factory, _embed, _alias_exact, _aliases
 ):
     """检查路径(followup_round == last_nlu_round 且非首轮)只跑 Step 4。"""
     from src.agent.nodes.build_query import build_query
@@ -119,10 +118,9 @@ def test_check_path_skips_ner_and_linking(
 @patch("src.agent.nodes.build_query.search_aliases", return_value=[])
 @patch("src.agent.nodes.build_query.query_term_by_alias_exact")
 @patch("src.agent.nodes.build_query.get_embedding_model")
-@patch("src.agent.nodes.build_query.build_sparse_queries", return_value=[])
 @patch("src.agent.nodes.build_query.get_llm")
 def test_dedup_appends_only_new_preferred_terms(
-    mock_llm_factory, _sparse, _embed, mock_alias_exact, _aliases
+    mock_llm_factory, _embed, mock_alias_exact, _aliases
 ):
     """已有 standardized_entities 中相同 preferred_term 的实体不重复追加。"""
     from src.agent.nodes.build_query import build_query
@@ -161,10 +159,9 @@ def test_dedup_appends_only_new_preferred_terms(
     {"concept_id": "R10.4", "preferred_term": "腹痛", "alias": "腹痛", "score": 0.97}
 ])
 @patch("src.agent.nodes.build_query.get_embedding_model")
-@patch("src.agent.nodes.build_query.build_sparse_queries", return_value=[])
 @patch("src.agent.nodes.build_query.get_llm")
 def test_el_tier2_vector_threshold_above_cutoff(
-    mock_llm_factory, _sparse, mock_embed, _aliases, _alias_exact
+    mock_llm_factory, mock_embed, _aliases, _alias_exact
 ):
     """Tier 1 不命中时,Tier 2 向量 Top-1 cosine ≥ 0.92 直接采纳。"""
     from src.agent.nodes.build_query import build_query
@@ -187,10 +184,9 @@ def test_el_tier2_vector_threshold_above_cutoff(
     {"concept_id": "R10.4", "preferred_term": "腹痛", "alias": "腹痛", "score": 0.80}
 ])
 @patch("src.agent.nodes.build_query.get_embedding_model")
-@patch("src.agent.nodes.build_query.build_sparse_queries", return_value=[])
 @patch("src.agent.nodes.build_query.get_llm")
 def test_el_tier2_below_cutoff_falls_to_tier3(
-    mock_llm_factory, _sparse, mock_embed, _aliases, _alias_exact
+    mock_llm_factory, mock_embed, _aliases, _alias_exact
 ):
     """Tier 2 cosine 0.80 < 0.92 阈值 → Tier 3 占位,preferred_term=None,confirmed_symptoms 空。"""
     from src.agent.nodes.build_query import build_query

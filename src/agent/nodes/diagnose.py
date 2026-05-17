@@ -122,6 +122,7 @@ def _rerank_and_truncate(
         documents=documents,
         top_k=top_k,
         timeout_sec=settings.reranker.TIMEOUT_SECONDS,
+        enabled=settings.reranker.ENABLED,
     )
     reranked = [candidate_chunks[i] for i in indices]
     text = [documents[i] for i in indices]
@@ -384,7 +385,7 @@ def diagnose(state: MedicalState) -> dict:
         api_key=settings.llm.VISION_API_KEY,
     )
     main_llm = get_llm()
-    evidence_chain = vision_llm.with_structured_output(EvidenceSheet).with_retry(stop_after_attempt=3)
+    evidence_chain = vision_llm.with_structured_output(EvidenceSheet, method="json_mode").with_retry(stop_after_attempt=3)
     ranking_chain = main_llm.with_structured_output(DiagnosisRanking, method="json_mode").with_retry(stop_after_attempt=3)
     calibration_chain = main_llm.with_structured_output(DiagnosisOutput, method="json_mode").with_retry(stop_after_attempt=3)
 

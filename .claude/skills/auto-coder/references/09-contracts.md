@@ -814,6 +814,7 @@ async def diagnose(req: DiagnoseRequest,
 | `ENTITY_LINKING_TIER2_THRESHOLD` | `0.92` | Tier 2 向量检索相似度截断（terms_collection 查询 Top-5 中，Cosine Similarity ≥ 此值才视为命中） | ④ `extract_symptoms` Tier 2（§4.1.2，§2.4.6）|
 | `RERANKER_CUTOFF_LAYERS` | `None`（=全层不截断；模型 layerwise 完整深度，BGE-Reranker-v2-minicpm-layerwise 为 40 层） | Cross-Encoder layerwise early-exit 截断层数；`None` = 跑满全层 | ⑩ Step 0 / Reranker 客户端（§2.3，§3.2.3）|
 | `RETRIEVE_PARENT_FIGURE_CAP` | `5` | Context 扩展规则 3:父块在 LLM context 里能带的同节图表数封顶（`chunk_type ∈ {table, figure}` 计数;按 `relative_chunk_index` 升序保留前 K 个） | ⑩ Step 0 后 / Context 扩展(§3.2.3)|
+| `RRF_DENSE_WEIGHT_FACTOR` | `5` | RRF 加权融合:dense 路加权 `max(1, N_sparse/factor)`,sparse 各路等权 1 票。2026-05-17 RETRIEVAL_EVAL §4 评测确定 — sparse 多字段直采后 N_sparse=12~30,等权下 dense 被挤兑,N/5 后 D/S ≈ 1:3~1:4 | ③ retrieve fusion / §3.2.2 |
 
 ### 9.7.2 定义位置与类型
 
@@ -836,6 +837,7 @@ class AgentLimitsSettings(BaseSettings):
     ENTITY_LINKING_TIER2_THRESHOLD:float = Field(0.92, description="Tier 2 向量检索相似度截断")
     RERANKER_CUTOFF_LAYERS:        int | None = Field(None, description="Cross-Encoder 提前退出层数，None=全层")
     RETRIEVE_PARENT_FIGURE_CAP:    int   = Field(5,    description="Context 扩展:父块在 LLM context 里能带的同节图表数封顶")
+    RRF_DENSE_WEIGHT_FACTOR:       int   = Field(5,    description="RRF 加权融合:dense_weight = max(1, N_sparse/factor)")
 
 class Settings(BaseSettings):
     # ... 其他段（llm / milvus / postgres / ...）
