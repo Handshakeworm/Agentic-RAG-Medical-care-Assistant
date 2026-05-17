@@ -44,7 +44,7 @@
 |---|---|
 | 数据处理 / RAG | • MinerU 解析 13 本医学教材(264948 文档块),每本教科书专配一套脚本精细化清洗切分<br>• 父子两级分块:外层按章节切出父块、内层按 token 切出子块 (12/13 本零边界丢失)<br>• 每块产出原文 + LLM enrichment 摘要 + LLM enrichment 3个假设患者问题, + BM25 倒排,共 26054 块 / 129810 向量入 Milvus<br>• 先 PG 后 Milvus 双写,幂等可重跑 + 自动清理孤儿块 |
 | Embedding / Reranker | • Qwen3-Embedding-8B(8.5GB)+ BGE-Reranker-v2-minicpm-layerwise(2.6GB) INT8 量化单卡 16GB 共显<br>• 精排 layerwise 早退加速;失败 / 超时回退到召回原序 |
-| Agent | • LangGraph 16 节点 + 2 条件分支组织成状态机<br>• **13 维 HPI 结构化主动问诊**:候选范围按 `空维度优先填 → TF-IDF 抽 chunk 关键词归一化 → 二元熵信息增益贪心选剩余症状 → LLM 可问性评估滤掉必须查体的体征 → 增益 < 0.15 阈值早退转诊断` 逐轮收敛,而非被动等用户描述<br>• 两段暂停等待用户输入(多轮澄清病史 / 上传补充检查报告)<br>• 诊断三步串联(证据 → 排序 → 输出),任一步多次重试失败就早停告知"信息不足以确诊"<br>• 最终输出经独立安全过滤,规避处方剂量与确诊口吻<br>• **LLM 按能力路由**:主链 DeepSeek 跑文本 14 处结构化输出,多模态分支 DashScope qwen3.5-plus 跑报告解析 |
+| Agent | • LangGraph 16 节点 + 2 条件分支组织成状态机<br>• **13 维 HPI 结构化主动问诊**:候选范围按 `空维度优先填 → TF-IDF 抽 chunk 关键词归一化 → 二元熵信息增益贪心选剩余症状 → LLM 可问性评估滤掉必须查体的体征 → 增益 < 0.15 阈值早退转诊断` 逐轮收敛,而非被动等用户描述<br>• Human in loop: 暂停等待用户输入(多轮澄清病史 / 上传补充检查报告)<br>• 诊断三步串联(证据 → 排序 → 输出),任一步多次重试失败就早停告知"信息不足以确诊"<br>• 最终输出经独立安全过滤,规避处方剂量与确诊口吻<br>• **LLM 按能力路由**:主链 DeepSeek 跑文本 14 处结构化输出,多模态分支 DashScope qwen3.5-plus 跑报告解析 |
 | 后端 | • FastAPI + JWT 实现注册 / 登录 / 角色守卫<br>• 限流先抽象后实现:单机内存版可换多副本 Redis 共享版,业务代码不动<br>• PostgreSQL 20 表 + Alembic 6 次迁移<br>• 每次问诊同事务写响应 + 15 字段审计链路(90 天保留) |
 | 基础设施 | • Docker Compose 13 容器一键启动<br>• Prometheus 6 监控目标 + 11 类业务指标(LLM 健康度 / 上下文长度 / PG·Redis·Milvus 三层依赖)<br>• Grafana 启动自动加载 2 仪表盘(应用 + 硬件);日志面板点击跳数据库审计详情<br>• 每请求一个 trace ID 串日志 / 审计 / 监控三路<br>• **基础设施降级哲学**:Redis 挂回源 PG / 限流 fail-open / Reranker 超时回退原序,故障半径控死在一层 |
 | 工程过程 | • Spec-driven 协作开发:[DEV_SPEC.md](DEV_SPEC.md) 唯一事实源,[CLAUDE.md](CLAUDE.md) 锚定开发红线<br>• 我做架构与取舍判断,Claude 落地代码 + 反向同步 §8.4 进度<br>• 测试 355 单元 + 71 集成 PASS |
@@ -53,9 +53,12 @@
 
 不是常见的"先 dense 再 sparse 后 rerank"流水,而是召回阶段同时玩两个维度的"多":
 
-**多路 RRF**(按症状维度拆 query):
-- Sparse 路按症状维度拆 — N 个症状维度词袋 = N 次独立 BM25(不是把所有词拼成 1 个 query)
-- Dense 路只 1 次 ANN
+**多路 RRF**(双源 sparse 词袋 + 1 路 dense):
+- Sparse 路 **双源词袋**:
+  - 来源 A — 症状维度:EL 链上 `concept_id` 在 `terms_collection` 的全部别名(含口语/缩写/英文)拼成一个词袋
+  - 来源 B — 报告语义信号:`report_findings` 的 `positive_findings` / `impressions` 每条作为独立词袋(如"瞳孔散大"、"右额颞线形骨折"直接进 sparse 召回)
+- 每条词袋 = 1 次独立 BM25(不是拼成 1 个 query),N 条 = N 次查询
+- Dense 路 1 次 ANN
 - (N+1) 路一起做 RRF 融合,某 chunk 命中维度越多权重越大 — **跨模态权重自调节,不需要手调 dense:sparse 比例**
 
 **多向量索引**(每个 chunk 入库 5 路向量):
